@@ -28,6 +28,8 @@ running `codex --yolo` to keep work parallel, bounded, and reviewable.
   across backend, frontend, analytics, or prompt-registry areas
 - `trellint/parallel-wave-execution.md`: run a Trellint development wave with
   worktrees, issue branches, tmux workers, and integration gates
+- `trellint/prompt-opportunity-scan.md`: scan the Trellint repo and the prompt
+  library for missing prompt opportunities, then add or refine prompts
 - `trellint/trellint-pr-review-and-rework-loop.md`: manage open Trellint PRs in
   a review/rework loop until they are low risk and ready to merge
 
