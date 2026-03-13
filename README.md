@@ -20,6 +20,8 @@ running `codex --yolo` to keep work parallel, bounded, and reviewable.
 - `generic/bug-debugging-and-issue-comment.md`: scan open bug issues, improve
   logging around one issue, attempt reproduction, and post a signed debugging
   comment
+- `generic/gemini-scoping-comment.md`: generate a Gemini scoping report from
+  full repo context and post it to the active issue or PR before implementation
 - `generic/pr-review-and-risk-assessment.md`: review a PR with parallel area
   audits and an explicit merge-risk decision
 - `trellint/chatbot-issue-execution.md`: deliver a change in the `chatbot`
