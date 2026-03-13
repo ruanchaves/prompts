@@ -24,8 +24,15 @@ running `codex --yolo` to keep work parallel, bounded, and reviewable.
   audits and an explicit merge-risk decision
 - `trellint/chatbot-issue-execution.md`: deliver a change in the `chatbot`
   project using the shared Python environment and targeted pytest runs
+- `trellint/chatbot-llm-evaluation-and-regression.md`: run chatbot evaluation
+  workflows, validate the golden dataset, execute judge-based runs, and analyze
+  failures
+- `trellint/chatbot-safe-deployment-and-backup.md`: perform safe chatbot
+  deployment, backup, restore, and post-deploy verification workflows
 - `trellint/rpp-feature-delivery.md`: implement a feature or fix in `rpp`
   across backend, frontend, analytics, or prompt-registry areas
+- `trellint/rpp-db-backup-and-restore.md`: export or import RPP databases using
+  the documented backup script with safety checks and verification
 - `trellint/parallel-wave-execution.md`: run a Trellint development wave with
   worktrees, issue branches, tmux workers, and integration gates
 - `trellint/prompt-opportunity-scan.md`: scan the Trellint repo and the prompt
