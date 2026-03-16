@@ -134,4 +134,3 @@ Approve promptly if clean. Flag critical issues clearly with concrete impact.'"
 - Never edit the original spec comment after a review is posted — always post revisions as new comments.
 - If any phase hits its retry limit, stop cleanly and post a summary comment on the issue explaining where
   the pipeline stalled and what needs human attention.
-- Total pipeline timeout: 30 minutes. If exceeded, stop and escalate.
