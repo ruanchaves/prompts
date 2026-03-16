@@ -3,6 +3,7 @@ delegate reviews to a separate codex process so that the author never reviews th
 
 Repo root: `<repo_path>`
 Prompt directory: `<prompts_path>` (contains `review-technical-spec.md` and `review-spec-implementation-pr.md`)
+Python virtual environment: `~/envs/trellint` (activate with `source ~/envs/trellint/bin/activate`)
 
 ---
 
@@ -62,11 +63,8 @@ retry once before escalating to the user.
 ### 1d. Act on the spec review
 - **APPROVE** → proceed to Phase 2.
 - **REQUEST CHANGES** → revise the spec to address every checked issue in the review. Post the updated spec
-  as a new comment (do not edit the original — preserve the review trail). Before re-running step 1b, include
-  in the reviewer prompt: "Also read the prior spec review at <comment_url> and verify that all previously
-  flagged issues have been addressed." Track which issues were flagged across cycles — if the same issue
-  reappears after being "fixed", stop and escalate to the user immediately rather than burning retries.
-  Maximum 3 revision cycles — if still not approved, stop and escalate to the user.
+  as a new comment (do not edit the original — preserve the review trail). Do **not** re-launch a second spec
+  review — one review pass is enough. After posting the revised spec, proceed directly to Phase 2.
 - **NEEDS DISCUSSION** → stop and escalate to the user with a summary of the open questions.
 
 ---
