@@ -28,6 +28,10 @@ Before addressing issue #<X>, you must write a technical spec as a comment on th
   - If this change causes a regression, what is the simplest way to revert it? Flag anything that makes a clean
   revert difficult (migrations, schema changes, external API contracts).
 
+  ### 6. Design Decisions
+  - For each non-obvious choice in the plan, briefly state what alternatives were considered and why they were
+  rejected. This gives reviewers context to distinguish intentional trade-offs from oversights.
+
   ## Rules
   - Do NOT begin implementation until the spec is posted and the user has approved it.
   - If the issue is ambiguous, list your assumptions explicitly in the spec rather than guessing silently.
