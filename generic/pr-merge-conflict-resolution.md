@@ -1,5 +1,4 @@
-Resolve merge conflicts on a pull request using a coordinator session plus
-`tmux` workers running `codex --yolo`. The goal is to produce a clean merge
+Resolve merge conflicts on a pull request. The goal is to produce a clean merge
 that preserves the intent of both the PR and the target branch, without
 silently dropping behavior from either side.
 
@@ -8,12 +7,6 @@ Inputs
 - GitHub repo: `<owner>/<repo>`
 - PR number: `<pr_number>`
 - Target branch: `<target_branch>`
-
-Worker orchestration
-- Keep the current shell as the conflict-resolution coordinator.
-- Start tmux workers only when conflicts span independent areas:
-  - `tmux new-session -d -s conflict_<pr_number>_area_codex "cd <repo_path> && codex --yolo"`
-- Do not create multiple workers that resolve the same file.
 
 Suggested GitHub commands
 ```bash
@@ -87,8 +80,7 @@ Resolution rules
 - The merge commit message should reference the PR number and briefly describe
   the conflict areas resolved.
 
-Coordinator responsibilities
-- Monitor tmux workers and prevent overlapping edits to the same file.
+Final checks
 - Review the complete merge diff before pushing.
 - Confirm CI is green after the push.
 
