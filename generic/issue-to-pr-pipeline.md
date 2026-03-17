@@ -42,22 +42,26 @@ Include these sections:
 Rules: keep the spec under 150 lines. If ambiguous, list assumptions explicitly. Do not begin implementation.
 
 ### 1b. Dispatch spec review to codex (you launch this)
-Once the spec comment is posted, launch a reviewer in a separate process. Load the review prompt from the
-prompt file rather than inlining it, substituting the issue number:
+Once the spec comment is posted, launch a reviewer in a separate process. Codex prints its review to stdout;
+you capture it and post it to GitHub yourself. Load the review prompt from the prompt file, substituting the
+issue number:
 
 ```
 tmux kill-session -t spec_review_<X> 2>/dev/null
 SPEC_PROMPT=$(sed 's/#<X>/#<ISSUE_NUMBER>/g' <prompts_path>/review-technical-spec.md)
 tmux new-session -d -s spec_review_<X> \
-  "cd <repo_path> && codex --yolo '$SPEC_PROMPT'"
+  "cd <repo_path> && codex --yolo '$SPEC_PROMPT' > /tmp/spec_review_<X>.txt 2>&1; \
+   echo '---CODEX_DONE---' >> /tmp/spec_review_<X>.txt"
 ```
 
 After launching, wait 10 seconds and then verify the tmux session is still running:
 `tmux has-session -t spec_review_<X> 2>/dev/null`. If the session died immediately, check for errors and
 retry once before escalating to the user.
 
-### 1c. Wait for the spec review
-- Poll the issue comments until the spec review appears (check every 30 seconds).
+### 1c. Wait for the spec review and post it
+- Poll `/tmp/spec_review_<X>.txt` until it contains `---CODEX_DONE---` (check every 30 seconds).
+- Read the file contents (excluding the sentinel line) — this is the review.
+- Post the review as a comment on the issue, prefixed with `**[Codex Review]**`.
 - Read the review verdict.
 
 ### 1d. Act on the spec review
@@ -111,7 +115,8 @@ Before opening the PR:
   - Any deviations from the spec, with justification.
 
 ### 2e. Dispatch PR review to codex (you launch this)
-Once the PR is open, launch a reviewer. Load the review prompt from the prompt file:
+Once the PR is open, launch a reviewer. Codex prints its review to stdout; you capture it and post it to
+GitHub yourself. Load the review prompt from the prompt file:
 
 ```
 tmux kill-session -t pr_review_<X> 2>/dev/null
@@ -121,14 +126,17 @@ PR_PROMPT="$PR_PROMPT
 Additionally: clone the branch, run the full test suite, and include the actual test results in your review.
 Do not rely solely on what the PR description claims — verify it."
 tmux new-session -d -s pr_review_<X> \
-  "cd <repo_path> && codex --yolo '$PR_PROMPT'"
+  "cd <repo_path> && codex --yolo '$PR_PROMPT' > /tmp/pr_review_<X>.txt 2>&1; \
+   echo '---CODEX_DONE---' >> /tmp/pr_review_<X>.txt"
 ```
 
 After launching, wait 10 seconds and verify the tmux session is running. If it died, retry once before
 escalating.
 
-### 2f. Wait for the PR review
-- Poll the PR reviews until the codex review appears (check every 30 seconds).
+### 2f. Wait for the PR review and post it
+- Poll `/tmp/pr_review_<X>.txt` until it contains `---CODEX_DONE---` (check every 30 seconds).
+- Read the file contents (excluding the sentinel line) — this is the review.
+- Post the review as a PR comment (or PR review via `gh`), prefixed with `**[Codex Review]**`.
 - Read the review verdict.
 
 ### 2g. Act on the PR review

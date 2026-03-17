@@ -40,12 +40,14 @@ technical spec and meets the project's quality bar.
   persisted state format changes) that were not flagged in the spec?
 
 ## Output Format
-Post a PR review using GitHub's review mechanism with one of:
+Print your review to stdout. Do NOT post to GitHub, submit PR reviews, or post comments.
+
+Use one of these verdicts:
 - **APPROVE** — if the implementation faithfully follows the spec and passes all checks.
 - **REQUEST CHANGES** — if there are issues that must be fixed before merge.
 - **COMMENT** — if there are only questions or non-blocking suggestions.
 
-Structure the review body as:
+Structure the review as:
 
 ```
 ## PR Review — Issue #<X>

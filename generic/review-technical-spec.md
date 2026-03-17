@@ -6,7 +6,7 @@ ambiguities before implementation begins.
 - Identify the spec comment (the one following the required spec format with Scope, Plan, Impact Analysis,
   Testing Strategy, and Rollback sections).
 - Evaluate the spec against the criteria below.
-- Post a single review comment on the issue with your findings.
+- Print your review to stdout. Do NOT post comments or interact with GitHub in any way.
 
 ## Evaluation Criteria
 
@@ -39,7 +39,7 @@ ambiguities before implementation begins.
   (migrations, schema changes, external API contracts, feature flags).
 
 ## Output Format
-Post a comment on the issue structured as:
+Print your review to stdout using the following structure (do NOT post to GitHub):
 
 ```
 ## Spec Review
