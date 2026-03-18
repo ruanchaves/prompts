@@ -24,6 +24,8 @@ running `codex --yolo` to keep work parallel, bounded, and reviewable.
   full repo context and post it to the active issue or PR before implementation
 - `generic/pr-review-and-risk-assessment.md`: review a PR with parallel area
   audits and an explicit merge-risk decision
+- `generic/closed-pr-post-merge-audit.md`: audit a merged PR for critical
+  mistakes that warrant reopening the PR, filing a bug issue, or both
 - `trellint/chatbot-issue-execution.md`: deliver a change in the `chatbot`
   project using the shared Python environment and targeted pytest runs
 - `trellint/chatbot-llm-evaluation-and-regression.md`: run chatbot evaluation
