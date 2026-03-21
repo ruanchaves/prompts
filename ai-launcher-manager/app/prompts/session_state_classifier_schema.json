@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["state", "confidence", "reason", "suggested_action"],
+  "properties": {
+    "state": {
+      "type": "string",
+      "enum": ["running", "idle", "rate_limited", "completed", "failed", "stuck"]
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1
+    },
+    "suggested_action": {
+      "type": "string",
+      "enum": ["continue_monitoring", "retry", "mark_completed", "mark_failed", "needs_human"]
+    }
+  }
+}

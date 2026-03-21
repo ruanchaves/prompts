@@ -9,6 +9,7 @@ running `codex --yolo` to keep work parallel, bounded, and reviewable.
 
 - `generic/`: reusable prompts that are not tied to one codebase
 - `trellint/`: prompts tailored to `/mnt/c/Users/ruan.rodrigues/Documents/GitHUb/trellint`
+- `ai-launcher-manager/`: Dockerized FastAPI + Redis + tmux launcher manager prototype
 - `continuous-pr-loop-prompt.md`: the original continuous PR management prompt
 
 ## Catalog
