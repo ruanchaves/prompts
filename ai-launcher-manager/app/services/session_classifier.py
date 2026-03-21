@@ -31,13 +31,28 @@ class SessionStateClassifier(Protocol):
 
 class HeuristicSessionClassifier:
     RATE_LIMIT_PATTERNS = (
-        "rate limit",
+        "rate limit reached",
+        "rate limited",
         "usage limit reached",
         "out of extra usage",
         "try again in",
         "limit reached",
         "hit your limit",
         "please try again in",
+    )
+
+    # Lines containing these substrings are informational banners, not
+    # provider state signals.  They must be stripped before pattern matching
+    # to avoid false positives (e.g. Codex's "New 2x rate limits until
+    # April 2nd" tip being classified as a rate-limit event).
+    BANNER_NOISE_PATTERNS = (
+        "tip:",
+        "2x rate limits",
+        "/model to change",
+        "/fast to enable",
+        "/skills to list",
+        "/init to create",
+        "/experimental",
     )
 
     READY_PATTERNS = (
@@ -52,8 +67,16 @@ class HeuristicSessionClassifier:
         self.settings = settings
         self.provider_manager = provider_manager
 
+    @classmethod
+    def _strip_banner_lines(cls, text: str) -> str:
+        lines = text.splitlines()
+        return "\n".join(
+            line for line in lines
+            if not any(noise in line for noise in cls.BANNER_NOISE_PATTERNS)
+        )
+
     async def classify(self, job: JobRecord, snapshot: SessionSnapshot) -> ClassificationResult:
-        output = snapshot.recent_output.lower()
+        output = self._strip_banner_lines(snapshot.recent_output.lower())
 
         if snapshot.pane_dead and snapshot.exit_code == 0:
             return ClassificationResult(

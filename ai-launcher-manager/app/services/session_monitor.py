@@ -141,6 +141,22 @@ class SessionMonitor:
                 SuggestedAction.RETRY_SEND_PROMPT,
                 SuggestedAction.SEND_PROMPT,
             }:
+                # Only retry after the delivery timeout has elapsed to give
+                # the provider time to start processing.  Without this guard,
+                # slower providers like Codex receive duplicate pastes because
+                # the classifier fires before visible output appears.
+                delivery_elapsed = (
+                    (utcnow() - job.prompt_sent_at).total_seconds()
+                    if job.prompt_sent_at
+                    else float("inf")
+                )
+                if delivery_elapsed < self.settings.prompt_delivery_timeout_seconds:
+                    self._transition_if_needed(
+                        job, JobState.SENDING_PROMPT, result.reason, result.source, previous_state,
+                    )
+                    await self.queue.save_job(job)
+                    return
+
                 if job.prompt_attempt_count < self.settings.max_prompt_delivery_attempts:
                     await self._send_pending_prompt(job, result.reason, result.source)
                     return
