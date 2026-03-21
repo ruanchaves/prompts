@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 
 def utcnow() -> datetime:
@@ -18,10 +18,11 @@ class JobProvider(str, Enum):
 
 class JobState(str, Enum):
     QUEUED = "queued"
-    STARTING = "starting"
+    LAUNCHING = "launching"
+    WAITING_FOR_PROVIDER_READY = "waiting_for_provider_ready"
+    SENDING_PROMPT = "sending_prompt"
     RUNNING = "running"
     WAITING_FOR_CLASSIFIER = "waiting_for_classifier"
-    IDLE = "idle"
     RATE_LIMITED = "rate_limited"
     RETRYING = "retrying"
     COMPLETED = "completed"
@@ -31,8 +32,10 @@ class JobState(str, Enum):
 
 
 class ClassificationState(str, Enum):
+    WAITING_FOR_PROVIDER_READY = "waiting_for_provider_ready"
+    READY_FOR_PROMPT = "ready_for_prompt"
+    PROMPT_DELIVERY_FAILED = "prompt_delivery_failed"
     RUNNING = "running"
-    IDLE = "idle"
     RATE_LIMITED = "rate_limited"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -41,10 +44,29 @@ class ClassificationState(str, Enum):
 
 class SuggestedAction(str, Enum):
     CONTINUE_MONITORING = "continue_monitoring"
-    RETRY = "retry"
+    SEND_PROMPT = "send_prompt"
+    RETRY_SEND_PROMPT = "retry_send_prompt"
+    SCHEDULE_RETRY = "schedule_retry"
+    PRESS_CONTINUE = "press_continue"
+    SEND_CONTINUE_MESSAGE = "send_continue_message"
+    RELAUNCH_PROVIDER = "relaunch_provider"
     MARK_COMPLETED = "mark_completed"
     MARK_FAILED = "mark_failed"
-    NEEDS_HUMAN = "needs_human"
+
+
+class RecoveryAction(str, Enum):
+    NONE = "none"
+    PRESS_CONTINUE = "press_continue"
+    SEND_CONTINUE_MESSAGE = "send_continue_message"
+    RELAUNCH_PROVIDER = "relaunch_provider"
+
+
+class ProviderHealthEvent(str, Enum):
+    COMPLETED = "completed"
+    FAILED = "failed"
+    RATE_LIMITED = "rate_limited"
+    STUCK = "stuck"
+    LAUNCH_FAILED = "launch_failed"
 
 
 TERMINAL_JOB_STATES = {
@@ -57,13 +79,15 @@ TERMINAL_JOB_STATES = {
 QUEUE_ELIGIBLE_JOB_STATES = {
     JobState.QUEUED,
     JobState.RETRYING,
+    JobState.RATE_LIMITED,
 }
 
 MONITORED_JOB_STATES = {
-    JobState.STARTING,
+    JobState.LAUNCHING,
+    JobState.WAITING_FOR_PROVIDER_READY,
+    JobState.SENDING_PROMPT,
     JobState.RUNNING,
     JobState.WAITING_FOR_CLASSIFIER,
-    JobState.IDLE,
 }
 
 
@@ -90,6 +114,10 @@ class ClassificationResult(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     reason: str
     suggested_action: SuggestedAction
+    provider_ready: bool = False
+    prompt_accepted: bool = False
+    recovery_action: RecoveryAction = RecoveryAction.NONE
+    retry_at: datetime | None = None
     source: str = Field(default="heuristic")
 
 
@@ -118,7 +146,7 @@ class JobCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     provider: JobProvider
-    command: str = Field(min_length=1)
+    prompt: str = Field(min_length=1)
     priority: int = Field(default=50, ge=0, le=100)
     retry_policy: RetryPolicy = Field(default_factory=RetryPolicy)
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -129,17 +157,24 @@ class JobRecord(BaseModel):
 
     job_id: str
     provider: JobProvider
-    command: str
+    prompt: str
     priority: int
     retry_policy: RetryPolicy
     metadata: dict[str, Any] = Field(default_factory=dict)
     state: JobState = JobState.QUEUED
     attempt_count: int = 0
+    prompt_attempt_count: int = 0
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
     started_at: datetime | None = None
     finished_at: datetime | None = None
     next_retry_at: datetime | None = None
+    provider_ready_at: datetime | None = None
+    prompt_sent_at: datetime | None = None
+    prompt_confirmed_at: datetime | None = None
+    last_rate_limit_at: datetime | None = None
+    recovery_action: RecoveryAction = RecoveryAction.NONE
+    active_prompt: str | None = None
     tmux_session: str | None = None
     tmux_window: str | None = None
     last_output: str = ""
@@ -149,6 +184,13 @@ class JobRecord(BaseModel):
     classifier_result: ClassificationResult | None = None
     failure_reason: str | None = None
     events: list[JobEvent] = Field(default_factory=list)
+
+    @computed_field(return_type=str)
+    @property
+    def launch_command(self) -> str:
+        if self.provider == JobProvider.CODEX:
+            return "codex --yolo"
+        return "claude --dangerously-skip-permissions"
 
     def add_event(self, state: JobState, message: str, source: str) -> None:
         self.events = (self.events + [JobEvent(state=state, message=message, source=source)])[-50:]
@@ -166,6 +208,19 @@ class JobRecord(BaseModel):
         return self.attempt_count < self.retry_policy.max_attempts
 
 
+class ProviderConcurrencyRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: JobProvider
+    current_limit: int
+    success_streak: int = 0
+    failure_streak: int = 0
+    total_completions: int = 0
+    total_failures: int = 0
+    total_rate_limits: int = 0
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
 class JobsListResponse(BaseModel):
     jobs: list[JobRecord]
     total: int
@@ -181,6 +236,7 @@ class HealthResponse(BaseModel):
 class MetricsResponse(BaseModel):
     counts_by_state: dict[str, int]
     total_jobs: int
+    provider_concurrency: list[ProviderConcurrencyRecord]
 
 
 class WorkerHeartbeat(BaseModel):

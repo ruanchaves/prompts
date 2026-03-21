@@ -61,11 +61,23 @@ async def retry_job(job_id: str, request: Request) -> JobRecord:
     job = await services.queue.get_job(job_id)
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
-    if job.state in {JobState.STARTING, JobState.RUNNING, JobState.WAITING_FOR_CLASSIFIER, JobState.IDLE}:
+    if job.state in {
+        JobState.LAUNCHING,
+        JobState.WAITING_FOR_PROVIDER_READY,
+        JobState.SENDING_PROMPT,
+        JobState.RUNNING,
+        JobState.WAITING_FOR_CLASSIFIER,
+    }:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Running jobs cannot be retried")
 
+    await services.tmux_manager.terminate_job(job)
     job.attempt_count = 0
+    job.prompt_attempt_count = 0
+    job.provider_ready_at = None
+    job.prompt_sent_at = None
+    job.prompt_confirmed_at = None
     job.next_retry_at = utcnow()
+    job.active_prompt = job.prompt
     job.failure_reason = None
     job.transition(JobState.RETRYING, "Manual retry requested", "api")
     await services.queue.save_job(job, schedule=True)

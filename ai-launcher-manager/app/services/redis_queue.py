@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime
 from typing import Iterable
 from uuid import uuid4
@@ -11,6 +10,7 @@ from redis.exceptions import WatchError
 from app.core.config import Settings
 from app.models.jobs import (
     JobCreateRequest,
+    JobProvider,
     JobRecord,
     JobState,
     JobsListResponse,
@@ -19,11 +19,6 @@ from app.models.jobs import (
     WorkerHeartbeat,
     utcnow,
 )
-
-
-@dataclass(slots=True)
-class QueueLease:
-    job: JobRecord | None = None
 
 
 class RedisQueue:
@@ -62,14 +57,15 @@ class RedisQueue:
         job = JobRecord(
             job_id=str(uuid4()),
             provider=payload.provider,
-            command=payload.command,
+            prompt=payload.prompt,
+            active_prompt=payload.prompt,
             priority=payload.priority,
             retry_policy=payload.retry_policy,
             metadata=payload.metadata,
             created_at=now,
             updated_at=now,
         )
-        job.add_event(state=job.state, message="Job enqueued", source="api")
+        job.add_event(state=job.state, message="Prompt job enqueued", source="api")
         await self.save_job(job, schedule=True)
         return job
 
@@ -82,7 +78,7 @@ class RedisQueue:
     ) -> JobRecord:
         job.updated_at = utcnow()
         pipeline = self.redis.pipeline()
-        pipeline.set(self.job_key(job.job_id), job.model_dump_json())
+        pipeline.set(self.job_key(job.job_id), job.model_dump_json(exclude_computed_fields=True))
         pipeline.sadd(self.jobs_index_key, job.job_id)
         if schedule:
             ready_at = job.next_retry_at or utcnow()
@@ -126,11 +122,19 @@ class RedisQueue:
             key=lambda job: (job.created_at, job.priority),
         )
 
+    async def list_jobs_by_provider_and_states(
+        self,
+        provider: JobProvider,
+        states: set[JobState],
+    ) -> list[JobRecord]:
+        jobs = await self.list_jobs_by_states(states)
+        return [job for job in jobs if job.provider == provider]
+
     async def list_scheduled_job_ids(self) -> set[str]:
         scheduled = await self.redis.zrange(self.scheduled_key, 0, -1)
         return set(scheduled)
 
-    async def lease_next_job(self) -> JobRecord | None:
+    async def lease_next_job(self, provider: JobProvider) -> JobRecord | None:
         for _ in range(5):
             pipeline = self.redis.pipeline()
             try:
@@ -140,7 +144,7 @@ class RedisQueue:
                     min="-inf",
                     max=self._schedule_score(utcnow()),
                     start=0,
-                    num=50,
+                    num=100,
                 )
                 if not ready_ids:
                     return None
@@ -149,7 +153,7 @@ class RedisQueue:
                 candidates = [
                     job
                     for job in jobs
-                    if job.state in QUEUE_ELIGIBLE_JOB_STATES or job.state == JobState.RATE_LIMITED
+                    if job.provider == provider and job.state in QUEUE_ELIGIBLE_JOB_STATES
                 ]
                 if not candidates:
                     return None
@@ -176,6 +180,10 @@ class RedisQueue:
 
     async def count_active_jobs(self) -> int:
         jobs = await self.list_jobs_by_states(MONITORED_JOB_STATES)
+        return len(jobs)
+
+    async def count_active_jobs_by_provider(self, provider: JobProvider) -> int:
+        jobs = await self.list_jobs_by_provider_and_states(provider, MONITORED_JOB_STATES)
         return len(jobs)
 
     async def record_worker_heartbeat(self, heartbeat: WorkerHeartbeat) -> None:

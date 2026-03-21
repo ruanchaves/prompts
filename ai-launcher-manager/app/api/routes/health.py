@@ -31,4 +31,9 @@ async def metrics(request: Request) -> MetricsResponse:
     services = _services(request)
     counts = await services.queue.counts_by_state()
     total = sum(counts.values())
-    return MetricsResponse(counts_by_state=counts, total_jobs=total)
+    provider_concurrency = await services.concurrency_controller.list_states()
+    return MetricsResponse(
+        counts_by_state=counts,
+        total_jobs=total,
+        provider_concurrency=provider_concurrency,
+    )

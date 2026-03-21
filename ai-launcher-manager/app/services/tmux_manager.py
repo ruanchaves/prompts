@@ -44,6 +44,33 @@ class TmuxManager:
             raise RuntimeError(stderr_text or stdout_text or f"Command failed: {' '.join(args)}")
         return process.returncode, stdout_text, stderr_text
 
+    async def _run_with_input(
+        self,
+        args: list[str],
+        *,
+        stdin_text: str,
+        check: bool = True,
+        timeout: int = 15,
+    ) -> tuple[int, str, str]:
+        process = await asyncio.create_subprocess_exec(
+            *args,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(stdin_text.encode("utf-8")), timeout=timeout)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            raise RuntimeError(f"Command timed out: {' '.join(args)}") from None
+
+        stdout_text = stdout.decode().strip()
+        stderr_text = stderr.decode().strip()
+        if check and process.returncode != 0:
+            raise RuntimeError(stderr_text or stdout_text or f"Command failed: {' '.join(args)}")
+        return process.returncode, stdout_text, stderr_text
+
     async def session_exists(self) -> bool:
         code, _, _ = await self._run("tmux", "has-session", "-t", self.session_name, check=False)
         return code == 0
@@ -96,7 +123,6 @@ class TmuxManager:
             "env",
             f"AILM_JOB_ID={job.job_id}",
             f"AILM_PROVIDER={job.provider.value}",
-            f"AILM_JOB_COMMAND={job.command}",
             "bash",
             str(self.wrapper_script),
         )
@@ -149,6 +175,25 @@ class TmuxManager:
             pane_current_command=pane_current_command,
             recent_output=output,
         )
+
+    async def send_prompt(self, job: JobRecord, prompt: str) -> None:
+        if not job.tmux_window or not await self.window_exists(job.tmux_window):
+            raise RuntimeError("Managed tmux window is missing")
+
+        target = f"{self.session_name}:{job.tmux_window}"
+        buffer_name = f"ailm-{job.job_id}"
+        await self._run_with_input(
+            ["tmux", "load-buffer", "-b", buffer_name, "-"],
+            stdin_text=prompt,
+        )
+        await self._run("tmux", "paste-buffer", "-d", "-b", buffer_name, "-t", target)
+        await self._run("tmux", "send-keys", "-t", target, "Enter")
+
+    async def press_continue(self, job: JobRecord) -> None:
+        if not job.tmux_window or not await self.window_exists(job.tmux_window):
+            raise RuntimeError("Managed tmux window is missing")
+        target = f"{self.session_name}:{job.tmux_window}"
+        await self._run("tmux", "send-keys", "-t", target, "Enter")
 
     async def terminate_job(self, job: JobRecord) -> None:
         if not job.tmux_window or not await self.window_exists(job.tmux_window):

@@ -2,16 +2,24 @@ from __future__ import annotations
 
 from app.core.config import Settings
 from app.models.jobs import JobState, MONITORED_JOB_STATES, TERMINAL_JOB_STATES, utcnow
+from app.services.provider_manager import ProviderManager
 from app.services.redis_queue import RedisQueue
 from app.services.tmux_manager import TmuxManager
 from app.utils.logging import get_logger
 
 
 class RecoveryService:
-    def __init__(self, settings: Settings, queue: RedisQueue, tmux_manager: TmuxManager) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        queue: RedisQueue,
+        tmux_manager: TmuxManager,
+        provider_manager: ProviderManager,
+    ) -> None:
         self.settings = settings
         self.queue = queue
         self.tmux_manager = tmux_manager
+        self.provider_manager = provider_manager
         self.logger = get_logger("ai_launcher_manager.recovery")
 
     async def reconcile(self) -> None:
@@ -22,8 +30,10 @@ class RecoveryService:
         now = utcnow()
 
         for job in jobs_response.jobs:
-            if job.state in TERMINAL_JOB_STATES and job.job_id in scheduled_ids:
+            if job.state in TERMINAL_JOB_STATES:
                 await self.queue.save_job(job, unschedule=True)
+                if job.tmux_window and job.tmux_window in managed_windows:
+                    await self.tmux_manager.cleanup_job(job, force=True)
                 continue
 
             if job.state in {JobState.QUEUED, JobState.RETRYING, JobState.RATE_LIMITED}:
@@ -43,6 +53,7 @@ class RecoveryService:
                 if job.can_retry:
                     job.next_retry_at = now
                     job.failure_reason = "Lost tmux window during recovery"
+                    job.active_prompt = job.active_prompt or self.provider_manager.default_prompt_for_job(job)
                     job.transition(JobState.RETRYING, "Active window missing during restart; requeued", "recovery")
                     await self.queue.save_job(job, schedule=True)
                 else:

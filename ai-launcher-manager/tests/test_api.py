@@ -7,7 +7,7 @@ from app.core.config import Settings
 from app.main import create_app
 
 
-def test_create_and_list_jobs_via_api() -> None:
+def test_create_and_list_prompt_jobs_via_api() -> None:
     redis_client = fakeredis.aioredis.FakeRedis(decode_responses=True)
     settings = Settings(enable_background_worker=False, classifier_enabled=False, test_mode=True)
     app = create_app(settings=settings, redis_client=redis_client)
@@ -17,12 +17,23 @@ def test_create_and_list_jobs_via_api() -> None:
             "/jobs",
             json={
                 "provider": "codex",
-                "command": "echo hello",
+                "prompt": "Summarize the repo",
                 "priority": 60,
             },
         )
         assert response.status_code == 201
         created = response.json()
+        assert created["prompt"] == "Summarize the repo"
+        assert created["launch_command"] == "codex --yolo"
+
+        invalid = client.post(
+            "/jobs",
+            json={
+                "provider": "codex",
+                "command": "echo hello",
+            },
+        )
+        assert invalid.status_code == 422
 
         list_response = client.get("/jobs")
         assert list_response.status_code == 200

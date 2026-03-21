@@ -9,6 +9,8 @@ from redis.asyncio import Redis, from_url
 from app.api.routes.health import router as health_router
 from app.api.routes.jobs import router as jobs_router
 from app.core.config import Settings
+from app.services.concurrency_controller import ConcurrencyController
+from app.services.provider_manager import ProviderManager
 from app.services.redis_queue import RedisQueue
 from app.services.recovery import RecoveryService
 from app.services.session_classifier import (
@@ -27,6 +29,8 @@ class AppServices:
     settings: Settings
     redis: Redis
     queue: RedisQueue
+    provider_manager: ProviderManager
+    concurrency_controller: ConcurrencyController
     tmux_manager: TmuxManager
     classifier: CompositeSessionClassifier
     session_monitor: SessionMonitor
@@ -37,19 +41,38 @@ class AppServices:
 def build_services(settings: Settings, redis_client: Redis | None = None) -> AppServices:
     redis = redis_client or from_url(settings.redis_url, decode_responses=True)
     queue = RedisQueue(redis, settings)
+    provider_manager = ProviderManager()
+    concurrency_controller = ConcurrencyController(redis, settings)
     tmux_manager = TmuxManager(settings)
     classifier = CompositeSessionClassifier(
         settings=settings,
-        primary=CodexCliSessionClassifier(settings),
-        fallback=HeuristicSessionClassifier(settings),
+        primary=CodexCliSessionClassifier(settings, provider_manager),
+        fallback=HeuristicSessionClassifier(settings, provider_manager),
     )
-    session_monitor = SessionMonitor(settings, queue, tmux_manager, classifier)
-    recovery = RecoveryService(settings, queue, tmux_manager)
-    worker = WorkerService(settings, queue, tmux_manager, session_monitor, recovery)
+    session_monitor = SessionMonitor(
+        settings=settings,
+        queue=queue,
+        tmux_manager=tmux_manager,
+        classifier=classifier,
+        provider_manager=provider_manager,
+        concurrency_controller=concurrency_controller,
+    )
+    recovery = RecoveryService(settings, queue, tmux_manager, provider_manager)
+    worker = WorkerService(
+        settings,
+        queue,
+        tmux_manager,
+        session_monitor,
+        recovery,
+        provider_manager,
+        concurrency_controller,
+    )
     return AppServices(
         settings=settings,
         redis=redis,
         queue=queue,
+        provider_manager=provider_manager,
+        concurrency_controller=concurrency_controller,
         tmux_manager=tmux_manager,
         classifier=classifier,
         session_monitor=session_monitor,
@@ -77,8 +100,8 @@ def create_app(settings: Settings | None = None, redis_client: Redis | None = No
 
     app = FastAPI(
         title=app_settings.app_name,
-        description="Queue and supervise claude/codex jobs running inside tmux.",
-        version="0.1.0",
+        description="Queue and supervise prompt-based claude/codex jobs running inside tmux.",
+        version="0.2.0",
         lifespan=lifespan,
     )
     app.state.services = services

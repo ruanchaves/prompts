@@ -2,11 +2,29 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["state", "confidence", "reason", "suggested_action"],
+  "required": [
+    "state",
+    "confidence",
+    "reason",
+    "suggested_action",
+    "provider_ready",
+    "prompt_accepted",
+    "recovery_action",
+    "retry_at"
+  ],
   "properties": {
     "state": {
       "type": "string",
-      "enum": ["running", "idle", "rate_limited", "completed", "failed", "stuck"]
+      "enum": [
+        "waiting_for_provider_ready",
+        "ready_for_prompt",
+        "prompt_delivery_failed",
+        "running",
+        "rate_limited",
+        "completed",
+        "failed",
+        "stuck"
+      ]
     },
     "confidence": {
       "type": "number",
@@ -19,7 +37,43 @@
     },
     "suggested_action": {
       "type": "string",
-      "enum": ["continue_monitoring", "retry", "mark_completed", "mark_failed", "needs_human"]
+      "enum": [
+        "continue_monitoring",
+        "send_prompt",
+        "retry_send_prompt",
+        "schedule_retry",
+        "press_continue",
+        "send_continue_message",
+        "relaunch_provider",
+        "mark_completed",
+        "mark_failed"
+      ]
+    },
+    "provider_ready": {
+      "type": "boolean"
+    },
+    "prompt_accepted": {
+      "type": "boolean"
+    },
+    "recovery_action": {
+      "type": "string",
+      "enum": [
+        "none",
+        "press_continue",
+        "send_continue_message",
+        "relaunch_provider"
+      ]
+    },
+    "retry_at": {
+      "anyOf": [
+        {
+          "type": "string",
+          "format": "date-time"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   }
 }

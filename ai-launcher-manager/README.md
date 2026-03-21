@@ -1,18 +1,31 @@
 # AI Launcher Manager
 
-`AI Launcher Manager` is a Dockerized FastAPI service that queues `claude` and `codex` jobs in Redis, launches them inside `tmux`, and monitors each session until it is completed, retried, cancelled, or marked failed/stuck.
+`AI Launcher Manager` is a Dockerized FastAPI service that queues prompt-based `claude` and `codex` jobs in Redis, launches fixed interactive provider sessions inside `tmux`, waits for provider readiness, injects prompts only after readiness is confirmed, and monitors each session until it completes, retries, rate-limits, or fails.
 
-The primary design choice is session-state evaluation through `codex exec` instead of relying only on fixed output heuristics. Deterministic heuristics still exist as a fallback when `codex` is unavailable, low-confidence, or contradicted by clear process-level signals such as a zero/non-zero exit.
+The main design choice is to use `codex exec` as the primary evaluator for:
+
+- provider readiness
+- prompt-acceptance confirmation
+- runtime state detection
+- Claude rate-limit / continue recovery decisions
+
+Fallback heuristics still exist as safeguards when `codex` is unavailable or low-confidence.
 
 ## Features
 
 - Redis-backed persistent queue and job state store
 - FastAPI API with OpenAPI docs at `/docs`
+- Prompt-based API contract: the service accepts `provider` + `prompt`
+- Fixed launch commands:
+  - `codex --yolo`
+  - `claude --dangerously-skip-permissions`
 - Dedicated `tmux` window per job
-- Background scheduler, monitor, recovery, and worker heartbeat loops
-- Codex-first session classification with heuristic fallback
-- Retry, backoff, cancellation, metrics, and restart reconciliation
-- Docker and Docker Compose for local execution
+- Readiness detection before prompt injection
+- Prompt-delivery retries when the message is sent too early
+- Codex-first Claude rate-limit recovery
+- Adaptive concurrency tracked separately for `codex` and `claude`
+- Automatic cleanup of completed tmux windows
+- Restart reconciliation for queued, partially launched, and rate-limited jobs
 
 ## Quick Start
 
@@ -41,14 +54,14 @@ The primary design choice is session-state evaluation through `codex exec` inste
 
 ## Example API Usage
 
-Create a job:
+Create a prompt job:
 
 ```bash
 curl -X POST http://localhost:8000/jobs \
   -H 'Content-Type: application/json' \
   -d '{
     "provider": "codex",
-    "command": "codex --no-alt-screen exec \"summarize the repository\"",
+    "prompt": "Inspect the repository and summarize the open risks.",
     "priority": 80
   }'
 ```
@@ -77,38 +90,49 @@ Retry a job:
 curl -X POST http://localhost:8000/jobs/<job-id>/retry
 ```
 
-## How State Detection Works
+## Launch Flow
 
-1. The monitor captures recent `tmux` pane output plus process metadata.
-2. That context is sent to a `SessionStateClassifier`.
-3. The primary classifier uses `codex exec` with a strict JSON schema.
-4. If the codex result is unavailable, invalid, or low-confidence, fallback heuristics decide.
-5. Deterministic exit signals override contradictory model output.
+1. A job is enqueued with `provider` and `prompt`.
+2. The scheduler launches the fixed provider command in a dedicated `tmux` window.
+3. The monitor captures pane output and asks `codex` whether the provider is ready.
+4. Once ready, the monitor injects the pending prompt into the live tmux pane.
+5. The monitor confirms that the prompt was actually accepted.
+6. If the prompt was sent too early, the system retries prompt delivery safely.
 
-The exposed job states are:
+## Claude Rate-Limit Recovery
 
-- `queued`
-- `starting`
-- `running`
-- `waiting_for_classifier`
-- `idle`
-- `rate_limited`
-- `retrying`
-- `completed`
-- `failed`
-- `stuck`
-- `cancelled`
+When Claude hits a usage limit, the app does not rely mainly on brittle regexes. Instead, the classifier inspects recent Claude output and returns:
+
+- whether Claude is in a continue-required limit state
+- the interpreted retry time in local time
+- whether the best next action is to:
+  - press/trigger the continue path in the existing tmux session
+  - or send:
+    `Continue where you left off. The previous attempt was rate limited.`
+
+Fallback parsing exists only as a safety net.
+
+## Adaptive Concurrency
+
+Concurrency is tracked per provider. Each provider starts at about 5 active sessions and then adapts independently:
+
+- sustained successful completions increase the limit gradually
+- failures, launch instability, stuck sessions, or rate limits reduce the limit
+
+The current limits are exposed through `/metrics` and worker heartbeats.
 
 ## Project Layout
 
-- `app/main.py`: FastAPI app factory and lifespan wiring
+- `app/main.py`: FastAPI app factory and wiring
+- `app/services/provider_manager.py`: fixed provider commands and continue message policy
+- `app/services/concurrency_controller.py`: adaptive per-provider concurrency state
 - `app/services/redis_queue.py`: Redis-backed queue and persistence
-- `app/services/tmux_manager.py`: tmux launch, capture, termination, discovery
+- `app/services/tmux_manager.py`: tmux launch, prompt injection, capture, termination, discovery
 - `app/services/session_classifier.py`: codex + heuristic classification
-- `app/services/session_monitor.py`: monitoring loop and state transitions
+- `app/services/session_monitor.py`: readiness gating, prompt delivery, runtime monitoring, rate-limit handling
 - `app/services/recovery.py`: restart reconciliation
 - `app/services/worker.py`: scheduler, monitor, and heartbeat loops
-- `docs/architecture.md`: architecture and state-machine notes
+- `docs/architecture.md`: state-machine and operations notes
 
 ## Local Development
 
@@ -134,9 +158,9 @@ pytest
 
 ## Assumptions and Limitations
 
-- The service is an MVP and runs its worker loops inside the FastAPI process.
-- `codex` and `claude` CLIs are expected to be installed in the container image.
-- Session classification cost is controlled by change-based and interval-based polling, but it is still model-backed and therefore non-zero cost.
-- `tmux` output is easier to monitor when interactive CLIs are launched with flags like `--no-alt-screen`.
+- The service runs its worker loops inside the FastAPI process.
+- `codex` and `claude` CLIs are expected to be installed in the runtime image.
+- The codex-based classifier improves flexibility but introduces model cost and uncertainty, so deterministic fallbacks still exist.
+- Exact readiness text from interactive CLIs may vary over time, which is why the state evaluator is model-assisted rather than regex-only.
 
-See [docs/architecture.md](docs/architecture.md) for the component breakdown and restart/retry behavior.
+See [docs/architecture.md](docs/architecture.md) for the state machine, recovery behavior, and concurrency policy.

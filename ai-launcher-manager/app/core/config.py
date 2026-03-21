@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import shlex
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -18,7 +20,6 @@ class Settings(BaseSettings):
     app_name: str = "AI Launcher Manager"
     redis_url: str = "redis://localhost:6379/0"
     queue_namespace: str = "ailm"
-    max_concurrent_jobs: int = Field(default=2, ge=1, le=100)
     scheduler_poll_interval_seconds: int = Field(default=3, ge=1, le=300)
     monitor_poll_interval_seconds: int = Field(default=5, ge=1, le=300)
     enable_background_worker: bool = True
@@ -26,7 +27,7 @@ class Settings(BaseSettings):
 
     tmux_session_name: str = "ai-launcher-manager"
     tmux_history_lines: int = Field(default=200, ge=50, le=5000)
-    tmux_cleanup_on_terminal_state: bool = False
+    tmux_cleanup_on_terminal_state: bool = True
 
     classifier_enabled: bool = True
     classifier_command: str = "codex"
@@ -37,6 +38,16 @@ class Settings(BaseSettings):
     classifier_min_confidence: float = Field(default=0.65, ge=0.0, le=1.0)
     classifier_max_output_chars: int = Field(default=8000, ge=500, le=64_000)
     stuck_idle_timeout_seconds: int = Field(default=900, ge=30, le=86_400)
+    prompt_delivery_timeout_seconds: int = Field(default=20, ge=5, le=600)
+    max_prompt_delivery_attempts: int = Field(default=3, ge=1, le=20)
+
+    initial_concurrency_per_provider: int = Field(default=5, ge=1, le=100)
+    min_concurrency_per_provider: int = Field(default=1, ge=1, le=100)
+    max_concurrency_per_provider: int = Field(default=10, ge=1, le=100)
+    concurrency_increase_after_successes: int = Field(default=3, ge=1, le=50)
+    concurrency_decrease_step: int = Field(default=1, ge=1, le=10)
+
+    local_timezone: str | None = None
 
     log_level: str = "INFO"
     test_mode: bool = False
@@ -60,3 +71,16 @@ class Settings(BaseSettings):
     @property
     def worker_heartbeat_ttl_seconds(self) -> int:
         return max(self.scheduler_poll_interval_seconds, self.monitor_poll_interval_seconds) * 4
+
+    @property
+    def effective_local_timezone(self) -> ZoneInfo:
+        if self.local_timezone:
+            try:
+                return ZoneInfo(self.local_timezone)
+            except ZoneInfoNotFoundError as exc:  # pragma: no cover - guarded by config
+                raise ValueError(f"Unknown timezone configured: {self.local_timezone}") from exc
+
+        detected = datetime.now().astimezone().tzinfo
+        if isinstance(detected, ZoneInfo):
+            return detected
+        return ZoneInfo("UTC")
