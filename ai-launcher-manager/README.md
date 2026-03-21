@@ -15,10 +15,11 @@ This split exists on purpose:
 Read the docs in this order:
 
 1. `README.md`
-2. [docs/host-worker.md](docs/host-worker.md)
-3. [docs/agent-runbook.md](docs/agent-runbook.md)
-4. [docs/api-reference.md](docs/api-reference.md)
-5. [docs/architecture.md](docs/architecture.md)
+2. [docs/operator-prompt.md](docs/operator-prompt.md)
+3. [docs/host-worker.md](docs/host-worker.md)
+4. [docs/agent-runbook.md](docs/agent-runbook.md)
+5. [docs/api-reference.md](docs/api-reference.md)
+6. [docs/architecture.md](docs/architecture.md)
 
 ## Execution Model
 
@@ -128,6 +129,7 @@ curl -X POST http://localhost:8003/jobs/<job-id>/retry
 ## Documentation Map
 
 - [docs/host-worker.md](docs/host-worker.md): exact host worker startup and inspection flow
+- [docs/operator-prompt.md](docs/operator-prompt.md): master prompt for an agent to self-start and operate the system
 - [docs/agent-runbook.md](docs/agent-runbook.md): end-to-end operation guide
 - [docs/api-reference.md](docs/api-reference.md): endpoints, payloads, fields, and health semantics
 - [docs/architecture.md](docs/architecture.md): queue model, worker split, lifecycle, recovery, and concurrency behavior
