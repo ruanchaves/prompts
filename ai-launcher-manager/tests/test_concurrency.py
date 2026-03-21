@@ -5,24 +5,23 @@ from datetime import timedelta
 import fakeredis.aioredis
 import pytest
 
-from app.core.config import Settings
 from app.models.common import utcnow
 from app.models.jobs import JobProvider, ProviderHealthEvent
-from app.services.concurrency_controller import ConcurrencyController
+from app.services.concurrency_controller import ConcurrencyController, ConcurrencySettings
 
 
-def _settings(**overrides) -> Settings:
+def _settings(**overrides) -> ConcurrencySettings:
     defaults = dict(
-        enable_background_worker=False,
-        classifier_enabled=False,
-        test_mode=True,
+        queue_namespace="ailm",
         initial_concurrency_per_provider=4,
+        initial_concurrency_overrides={},
+        min_concurrency_per_provider=1,
         concurrency_safety_ceiling=50,
         concurrency_increase_after_successes=2,
         high_water_mark_reset_seconds=3600,
     )
     defaults.update(overrides)
-    return Settings(**defaults)
+    return ConcurrencySettings(**defaults)
 
 
 @pytest.mark.asyncio
@@ -131,6 +130,23 @@ async def test_providers_tracked_independently() -> None:
 
     assert codex.current_limit == 2  # 4 // 2 = 2
     assert claude.current_limit == 4  # untouched
+
+    await redis_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_provider_specific_initial_override_applies_only_to_target_provider() -> None:
+    redis_client = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    controller = ConcurrencyController(
+        redis_client,
+        _settings(initial_concurrency_overrides={JobProvider.CODEX: 10}),
+    )
+
+    codex = await controller.get_state(JobProvider.CODEX)
+    claude = await controller.get_state(JobProvider.CLAUDE)
+
+    assert codex.current_limit == 10
+    assert claude.current_limit == 4
 
     await redis_client.aclose()
 

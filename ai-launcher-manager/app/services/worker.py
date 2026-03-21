@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import timedelta
 
-from app.core.config import Settings
 from app.models.jobs import (
     JobProvider,
     JobRecord,
@@ -23,10 +23,19 @@ from app.services.tmux_manager import TmuxManager
 from app.utils.logging import get_logger
 
 
+@dataclass(frozen=True, slots=True)
+class WorkerSettings:
+    scheduler_poll_interval_seconds: int
+    monitor_poll_interval_seconds: int
+    worker_id: str
+    worker_execution_target: str
+    tmux_session_name: str
+
+
 class WorkerService:
     def __init__(
         self,
-        settings: Settings,
+        settings: WorkerSettings,
         queue: RedisQueue,
         tmux_manager: TmuxManager,
         session_monitor: SessionMonitor,
@@ -43,15 +52,20 @@ class WorkerService:
         self.concurrency_controller = concurrency_controller
         self.stop_event = asyncio.Event()
         self.tasks: list[asyncio.Task[None]] = []
+        self.failure_future: asyncio.Future[None] | None = None
         self.logger = get_logger("ai_launcher_manager.worker")
 
     async def start(self) -> None:
         await self.recovery.reconcile()
+        self.stop_event.clear()
+        self.failure_future = asyncio.get_running_loop().create_future()
         self.tasks = [
             asyncio.create_task(self._scheduler_loop(), name="scheduler-loop"),
             asyncio.create_task(self._monitor_loop(), name="monitor-loop"),
             asyncio.create_task(self._heartbeat_loop(), name="heartbeat-loop"),
         ]
+        for task in self.tasks:
+            task.add_done_callback(self._handle_task_completion)
 
     async def stop(self) -> None:
         self.stop_event.set()
@@ -59,6 +73,8 @@ class WorkerService:
             task.cancel()
         if self.tasks:
             await asyncio.gather(*self.tasks, return_exceptions=True)
+        if self.failure_future is not None and not self.failure_future.done():
+            self.failure_future.cancel()
 
     async def _scheduler_loop(self) -> None:
         while not self.stop_event.is_set():
@@ -70,13 +86,31 @@ class WorkerService:
 
     async def _monitor_loop(self) -> None:
         while not self.stop_event.is_set():
-            try:
-                jobs = await self.queue.list_jobs_by_states(MONITORED_JOB_STATES)
-                for job in jobs:
-                    await self.session_monitor.inspect_job(job)
-            except Exception as exc:  # pragma: no cover - safety net
-                self.logger.exception("monitor loop error: %s", exc)
+            jobs = await self.queue.list_jobs_by_states(MONITORED_JOB_STATES)
+            if jobs:
+                await asyncio.gather(*(self.session_monitor.inspect_job(job) for job in jobs))
             await asyncio.sleep(self.settings.monitor_poll_interval_seconds)
+
+    async def wait_for_failure(self) -> None:
+        if self.failure_future is None:
+            raise RuntimeError("worker has not been started")
+        await self.failure_future
+
+    def _handle_task_completion(self, task: asyncio.Task[None]) -> None:
+        if task.cancelled():
+            return
+
+        exc = task.exception()
+        if self.stop_event.is_set():
+            return
+
+        if exc is None:
+            exc = RuntimeError(f"worker task {task.get_name()} exited unexpectedly")
+
+        self.stop_event.set()
+        self.logger.critical("worker task %s crashed: %s", task.get_name(), exc, exc_info=exc)
+        if self.failure_future is not None and not self.failure_future.done():
+            self.failure_future.set_exception(exc)
 
     async def _heartbeat_loop(self) -> None:
         while not self.stop_event.is_set():
@@ -108,13 +142,8 @@ class WorkerService:
     async def _launch_ready_jobs(self) -> None:
         for provider in JobProvider:
             limit = await self.concurrency_controller.get_limit(provider)
-            active_jobs = await self.queue.count_active_jobs_by_provider(provider)
-            available_slots = max(0, limit - active_jobs)
-            if available_slots == 0:
-                continue
-
-            for _ in range(available_slots):
-                job = await self.queue.lease_next_job(provider)
+            while not self.stop_event.is_set():
+                job = await self.queue.lease_next_job(provider, limit)
                 if job is None:
                     break
                 await self._start_or_resume_job(job)

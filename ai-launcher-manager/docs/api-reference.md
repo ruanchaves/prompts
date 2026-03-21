@@ -255,7 +255,6 @@ Use this to inspect:
 - `waiting_for_provider_ready`
 - `sending_prompt`
 - `running`
-- `waiting_for_classifier`
 - `cancel_requested`
 - `rate_limited`
 - `retrying`
@@ -266,5 +265,11 @@ Use this to inspect:
 
 State meaning:
 
+- `waiting_for_provider_ready`: the provider process is up and the worker is waiting to inject the prompt through tmux
+- `sending_prompt`: the prompt was pasted and the worker is confirming that the provider accepted it
 - `cancel_requested`: the API accepted a live cancellation, but the host worker still needs to kill the tmux session
 - `cancelled`: cancellation is complete
+
+Legacy note:
+
+- `waiting_for_classifier` is only a backward-compatibility recovery state for older persisted jobs

@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
+import shlex
+import signal
 import tempfile
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from app.core.config import Settings
 from app.models.jobs import (
     ClassificationResult,
     ClassificationState,
@@ -27,6 +30,34 @@ from app.utils.logging import get_logger
 class SessionStateClassifier(Protocol):
     async def classify(self, job: JobRecord, snapshot: SessionSnapshot) -> ClassificationResult:
         ...
+
+
+class SessionClassificationError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class HeuristicClassifierSettings:
+    prompt_delivery_timeout_seconds: int
+    stuck_idle_timeout_seconds: int
+    effective_local_timezone: ZoneInfo
+
+
+@dataclass(frozen=True, slots=True)
+class CodexClassifierSettings:
+    classifier_prompt_path: Path
+    classifier_schema_path: Path
+    classifier_command_parts: list[str]
+    classifier_model: str | None
+    classifier_timeout_seconds: int
+    classifier_max_output_chars: int
+    effective_local_timezone: ZoneInfo
+
+
+@dataclass(frozen=True, slots=True)
+class CompositeClassifierSettings:
+    classifier_enabled: bool
+    classifier_min_confidence: float
 
 
 class HeuristicSessionClassifier:
@@ -63,7 +94,7 @@ class HeuristicSessionClassifier:
         "welcome to claude",
     )
 
-    def __init__(self, settings: Settings, provider_manager: ProviderManager) -> None:
+    def __init__(self, settings: HeuristicClassifierSettings, provider_manager: ProviderManager) -> None:
         self.settings = settings
         self.provider_manager = provider_manager
 
@@ -231,13 +262,27 @@ class HeuristicSessionClassifier:
 
 
 class CodexCliSessionClassifier:
-    def __init__(self, settings: Settings, provider_manager: ProviderManager) -> None:
+    ANSI_ESCAPE_RE = re.compile(
+        r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))"
+    )
+    MARKER_START = "__AILM_CLASSIFICATION_START__"
+    MARKER_END = "__AILM_CLASSIFICATION_END__"
+
+    def __init__(self, settings: CodexClassifierSettings, provider_manager: ProviderManager) -> None:
         self.settings = settings
         self.provider_manager = provider_manager
         self.logger = get_logger("ai_launcher_manager.codex_classifier")
         self.prompt_template = self.settings.classifier_prompt_path.read_text(encoding="utf-8")
+        self.schema_text = self.settings.classifier_schema_path.read_text(encoding="utf-8")
 
     def _build_prompt(self, job: JobRecord, snapshot: SessionSnapshot) -> str:
+        def _preview_text(value: str | None, *, limit: int = 1500) -> str | None:
+            if value is None:
+                return None
+            if len(value) <= limit:
+                return value
+            return f"{value[:limit]}\n...<truncated {len(value) - limit} chars>"
+
         local_now = datetime.now(self.settings.effective_local_timezone)
         context = {
             "job_id": job.job_id,
@@ -246,8 +291,10 @@ class CodexCliSessionClassifier:
             "attempt_count": job.attempt_count,
             "prompt_attempt_count": job.prompt_attempt_count,
             "launch_command": job.launch_command,
-            "original_prompt": job.prompt,
-            "pending_prompt": job.active_prompt,
+            "original_prompt": _preview_text(job.prompt),
+            "pending_prompt": _preview_text(job.active_prompt),
+            "original_prompt_chars": len(job.prompt),
+            "pending_prompt_chars": len(job.active_prompt) if job.active_prompt is not None else 0,
             "continue_message": self.provider_manager.continue_message_for_job(job),
             "provider_ready_at": job.provider_ready_at.isoformat() if job.provider_ready_at else None,
             "prompt_sent_at": job.prompt_sent_at.isoformat() if job.prompt_sent_at else None,
@@ -262,51 +309,150 @@ class CodexCliSessionClassifier:
             "observed_at": snapshot.observed_at.isoformat(),
             "recent_output": snapshot.recent_output[-self.settings.classifier_max_output_chars :],
         }
-        return self.prompt_template.format(context=json.dumps(context, indent=2))
+        return self.prompt_template.format(
+            context=json.dumps(context, indent=2),
+            schema=self.schema_text,
+            marker_start=self.MARKER_START,
+            marker_end=self.MARKER_END,
+        )
+
+    def _build_command(self, prompt_path: Path) -> list[str]:
+        command_parts = [*self.settings.classifier_command_parts]
+        if self.settings.classifier_model:
+            command_parts.extend(["-m", self.settings.classifier_model])
+        command_parts.append("--yolo")
+        classifier_command = " ".join(
+            shlex.quote(part) for part in command_parts
+        )
+        shell_command = f'{classifier_command} "$(cat {shlex.quote(str(prompt_path))})"'
+        return ["script", "-qefc", shell_command, "/dev/null"]
+
+    @classmethod
+    def _sanitize_output(cls, output: str) -> str:
+        sanitized = output.replace("\r", "\n")
+        sanitized = cls.ANSI_ESCAPE_RE.sub("", sanitized)
+        sanitized = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", sanitized)
+        return sanitized
+
+    @classmethod
+    def _search_payload(cls, output: str) -> str | None:
+        sanitized = cls._sanitize_output(output)
+        pattern = re.compile(
+            rf"{re.escape(cls.MARKER_START)}\s*(\{{.*?\}})\s*{re.escape(cls.MARKER_END)}",
+            re.DOTALL,
+        )
+        match = pattern.search(sanitized)
+        if not match:
+            return None
+        return match.group(1)
+
+    @classmethod
+    def _extract_payload(cls, output: str) -> str:
+        match_payload = cls._search_payload(output)
+        if match_payload is not None:
+            return match_payload
+        sanitized = cls._sanitize_output(output)
+        excerpt = sanitized[-2000:].strip() or "<no output captured>"
+        raise SessionClassificationError(
+            "codex classifier did not return the required JSON markers. "
+            f"Captured output excerpt:\n{excerpt}"
+        )
+
+    @staticmethod
+    def _failure_message(job: JobRecord, snapshot: SessionSnapshot, detail: str) -> str:
+        return (
+            "codex session classification failed "
+            f"for job {job.job_id} ({snapshot.tmux_target}): {detail}"
+        )
+
+    async def _terminate_process(self, process: asyncio.subprocess.Process, *, force: bool = False) -> None:
+        if process.returncode is not None:
+            return
+
+        sig = signal.SIGKILL if force else signal.SIGTERM
+        try:
+            os.killpg(process.pid, sig)
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            if force:
+                process.kill()
+
+    async def _wait_for_exit(self, process: asyncio.subprocess.Process, *, timeout: int = 5) -> None:
+        try:
+            await asyncio.wait_for(process.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            await self._terminate_process(process, force=True)
+            await process.wait()
+
+    async def _read_payload(
+        self,
+        process: asyncio.subprocess.Process,
+        job: JobRecord,
+        snapshot: SessionSnapshot,
+    ) -> str:
+        assert process.stdout is not None
+        output = ""
+
+        while True:
+            chunk = await process.stdout.read(4096)
+            if not chunk:
+                break
+
+            output += chunk.decode("utf-8", errors="replace")
+            payload = self._search_payload(output)
+            if payload is not None:
+                await self._terminate_process(process)
+                await self._wait_for_exit(process)
+                return payload
+
+        if process.returncode is None:
+            await process.wait()
+
+        if process.returncode != 0:
+            detail = output.strip() or f"classifier command exited with status {process.returncode}"
+            raise SessionClassificationError(self._failure_message(job, snapshot, detail))
+
+        try:
+            return self._extract_payload(output)
+        except SessionClassificationError as exc:
+            raise SessionClassificationError(self._failure_message(job, snapshot, str(exc))) from exc
 
     async def classify(self, job: JobRecord, snapshot: SessionSnapshot) -> ClassificationResult:
         prompt = self._build_prompt(job, snapshot)
         with tempfile.TemporaryDirectory(prefix="ailm-classifier-") as temp_dir:
-            output_path = Path(temp_dir) / "classification.json"
-            command = [
-                *self.settings.classifier_command_parts,
-                "exec",
-                "--skip-git-repo-check",
-                "--ephemeral",
-                "--sandbox",
-                "read-only",
-                "--color",
-                "never",
-                "--output-schema",
-                str(self.settings.classifier_schema_path),
-                "-o",
-                str(output_path),
-            ]
-            if self.settings.classifier_model:
-                command.extend(["-m", self.settings.classifier_model])
-            command.append("-")
+            prompt_path = Path(temp_dir) / "classification_prompt.txt"
+            prompt_path.write_text(prompt, encoding="utf-8")
+            command = self._build_command(prompt_path)
 
             process = await asyncio.create_subprocess_exec(
                 *command,
-                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                start_new_session=True,
             )
             try:
-                stdout, stderr = await asyncio.wait_for(
-                    process.communicate(prompt.encode("utf-8")),
+                payload = await asyncio.wait_for(
+                    self._read_payload(process, job, snapshot),
                     timeout=self.settings.classifier_timeout_seconds,
                 )
             except asyncio.TimeoutError:
-                process.kill()
+                await self._terminate_process(process, force=True)
                 await process.wait()
-                raise RuntimeError("codex classifier timed out") from None
+                raise SessionClassificationError(
+                    self._failure_message(
+                        job,
+                        snapshot,
+                        f"classifier command timed out after {self.settings.classifier_timeout_seconds} seconds",
+                    )
+                ) from None
 
-            if process.returncode != 0:
-                raise RuntimeError(stderr.decode().strip() or stdout.decode().strip() or "codex classifier failed")
-
-            payload = output_path.read_text(encoding="utf-8").strip()
-            result = ClassificationResult.model_validate(json.loads(payload))
+            try:
+                result = ClassificationResult.model_validate_json(payload)
+            except Exception as exc:
+                raise SessionClassificationError(
+                    self._failure_message(job, snapshot, f"invalid classifier JSON payload: {exc}")
+                ) from exc
             result.source = "codex"
             return result
 
@@ -314,7 +460,7 @@ class CodexCliSessionClassifier:
 class CompositeSessionClassifier:
     def __init__(
         self,
-        settings: Settings,
+        settings: CompositeClassifierSettings,
         primary: CodexCliSessionClassifier,
         fallback: HeuristicSessionClassifier,
     ) -> None:
@@ -324,32 +470,23 @@ class CompositeSessionClassifier:
         self.logger = get_logger("ai_launcher_manager.classifier")
 
     async def classify(self, job: JobRecord, snapshot: SessionSnapshot) -> ClassificationResult:
-        heuristic_result = await self.fallback.classify(job, snapshot)
         if not self.settings.classifier_enabled:
-            return heuristic_result
+            return await self.fallback.classify(job, snapshot)
 
         try:
             codex_result = await self.primary.classify(job, snapshot)
-        except Exception as exc:  # pragma: no cover - exercised via fallback path
-            self.logger.warning("codex classification failed for job %s: %s", job.job_id, exc)
-            heuristic_result.reason = f"codex classifier unavailable; {heuristic_result.reason}"
-            heuristic_result.source = "combined"
-            return heuristic_result
-
-        if snapshot.pane_dead and heuristic_result.state in {ClassificationState.COMPLETED, ClassificationState.FAILED}:
-            if codex_result.state != heuristic_result.state:
-                heuristic_result.reason = (
-                    f"codex suggested {codex_result.state.value}, but deterministic exit signals indicate "
-                    f"{heuristic_result.state.value}"
-                )
-                heuristic_result.source = "combined"
-                return heuristic_result
-
-        if codex_result.confidence >= self.settings.classifier_min_confidence:
-            return codex_result
-
-        heuristic_result.reason = (
-            f"codex confidence {codex_result.confidence:.2f} below threshold; {heuristic_result.reason}"
-        )
-        heuristic_result.source = "combined"
-        return heuristic_result
+        except SessionClassificationError:
+            raise
+        except Exception as exc:
+            raise SessionClassificationError(
+                "codex session classification failed "
+                f"for job {job.job_id} ({snapshot.tmux_target}): unexpected classifier error: {exc}"
+            ) from exc
+        if codex_result.confidence < self.settings.classifier_min_confidence:
+            raise SessionClassificationError(
+                "codex session classification failed "
+                f"for job {job.job_id} ({snapshot.tmux_target}): "
+                f"classifier confidence {codex_result.confidence:.2f} is below the required "
+                f"{self.settings.classifier_min_confidence:.2f}"
+            )
+        return codex_result

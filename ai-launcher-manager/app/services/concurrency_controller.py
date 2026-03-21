@@ -1,13 +1,25 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+
 from redis.asyncio import Redis
 
-from app.core.config import Settings
 from app.models.jobs import JobProvider, ProviderConcurrencyRecord, ProviderHealthEvent, utcnow
 
 
+@dataclass(frozen=True, slots=True)
+class ConcurrencySettings:
+    queue_namespace: str
+    initial_concurrency_per_provider: int
+    min_concurrency_per_provider: int
+    concurrency_safety_ceiling: int
+    concurrency_increase_after_successes: int
+    high_water_mark_reset_seconds: int
+    initial_concurrency_overrides: dict[JobProvider, int] = field(default_factory=dict)
+
+
 class ConcurrencyController:
-    def __init__(self, redis_client: Redis, settings: Settings) -> None:
+    def __init__(self, redis_client: Redis, settings: ConcurrencySettings) -> None:
         self.redis = redis_client
         self.settings = settings
         self.namespace = settings.queue_namespace
@@ -15,10 +27,16 @@ class ConcurrencyController:
     def key(self, provider: JobProvider) -> str:
         return f"{self.namespace}:provider-concurrency:{provider.value}"
 
+    def _initial_limit_for_provider(self, provider: JobProvider) -> int:
+        return self.settings.initial_concurrency_overrides.get(
+            provider,
+            self.settings.initial_concurrency_per_provider,
+        )
+
     def _default_record(self, provider: JobProvider) -> ProviderConcurrencyRecord:
         return ProviderConcurrencyRecord(
             provider=provider,
-            current_limit=self.settings.initial_concurrency_per_provider,
+            current_limit=self._initial_limit_for_provider(provider),
         )
 
     async def get_state(self, provider: JobProvider) -> ProviderConcurrencyRecord:

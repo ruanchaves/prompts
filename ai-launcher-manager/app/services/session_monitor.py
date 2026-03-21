@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
 from datetime import timedelta
 
-from app.core.config import Settings
 from app.models.jobs import (
     ClassificationResult,
     ClassificationState,
@@ -24,10 +24,19 @@ from app.services.tmux_manager import TmuxManager
 from app.utils.logging import get_logger
 
 
+@dataclass(frozen=True, slots=True)
+class MonitorSettings:
+    classifier_max_output_chars: int
+    classifier_min_interval_seconds: int
+    classifier_max_interval_seconds: int
+    prompt_delivery_timeout_seconds: int
+    max_prompt_delivery_attempts: int
+
+
 class SessionMonitor:
     def __init__(
         self,
-        settings: Settings,
+        settings: MonitorSettings,
         queue: RedisQueue,
         tmux_manager: TmuxManager,
         classifier: CompositeSessionClassifier,
@@ -41,6 +50,64 @@ class SessionMonitor:
         self.provider_manager = provider_manager
         self.concurrency_controller = concurrency_controller
         self.logger = get_logger("ai_launcher_manager.monitor")
+
+    def _deterministic_result(
+        self,
+        job: JobRecord,
+        snapshot: SessionSnapshot,
+        output_changed: bool,
+    ) -> ClassificationResult | None:
+        if snapshot.pane_dead:
+            state = ClassificationState.COMPLETED if snapshot.exit_code in (None, 0) else ClassificationState.FAILED
+            suggested_action = (
+                SuggestedAction.MARK_COMPLETED if state == ClassificationState.COMPLETED else SuggestedAction.MARK_FAILED
+            )
+            reason = (
+                "tmux pane exited cleanly"
+                if state == ClassificationState.COMPLETED
+                else f"tmux pane exited with non-zero status {snapshot.exit_code}"
+            )
+            return ClassificationResult(
+                state=state,
+                confidence=0.99,
+                reason=reason,
+                suggested_action=suggested_action,
+                provider_ready=job.provider_ready_at is not None,
+                prompt_accepted=job.prompt_confirmed_at is not None,
+                source="deterministic",
+            )
+
+        if job.state == JobState.WAITING_FOR_PROVIDER_READY and snapshot.recent_output.strip():
+            return ClassificationResult(
+                state=ClassificationState.READY_FOR_PROMPT,
+                confidence=0.99,
+                reason=f"{job.provider.value} displayed startup output and is ready for prompt injection",
+                suggested_action=SuggestedAction.SEND_PROMPT,
+                provider_ready=True,
+                prompt_accepted=False,
+                source="deterministic",
+            )
+
+        if (
+            job.provider == JobProvider.CLAUDE
+            and
+            job.state == JobState.SENDING_PROMPT
+            and output_changed
+            and job.prompt_sent_at is not None
+            and job.last_output_at is not None
+            and job.last_output_at > job.prompt_sent_at
+        ):
+            return ClassificationResult(
+                state=ClassificationState.RUNNING,
+                confidence=0.95,
+                reason="Claude output changed after prompt injection",
+                suggested_action=SuggestedAction.CONTINUE_MONITORING,
+                provider_ready=True,
+                prompt_accepted=True,
+                source="deterministic",
+            )
+
+        return None
 
     async def inspect_job(self, job: JobRecord) -> JobRecord:
         if job.state == JobState.CANCEL_REQUESTED:
@@ -68,8 +135,12 @@ class SessionMonitor:
             return job
 
         previous_state = job.state
-        job.state = JobState.WAITING_FOR_CLASSIFIER
-        await self.queue.save_job(job)
+        deterministic_result = self._deterministic_result(job, snapshot, output_changed)
+        if deterministic_result is not None:
+            job.last_classification_at = utcnow()
+            job.classifier_result = deterministic_result
+            await self._apply_classification(job, snapshot, deterministic_result, previous_state)
+            return job
 
         result = await self.classifier.classify(job, snapshot)
         job.last_classification_at = utcnow()
@@ -80,12 +151,21 @@ class SessionMonitor:
     def _should_classify(self, job: JobRecord, snapshot: SessionSnapshot, output_changed: bool) -> bool:
         if snapshot.pane_dead:
             return True
-        if output_changed:
-            return True
         if job.last_classification_at is None:
             return True
+
+        if job.state in {JobState.WAITING_FOR_PROVIDER_READY, JobState.SENDING_PROMPT}:
+            if output_changed:
+                return True
+            elapsed = (snapshot.observed_at - job.last_classification_at).total_seconds()
+            return elapsed >= self.settings.classifier_max_interval_seconds
+
         elapsed = (snapshot.observed_at - job.last_classification_at).total_seconds()
-        return elapsed >= self.settings.classifier_max_interval_seconds
+        if elapsed >= self.settings.classifier_max_interval_seconds:
+            return True
+        if not output_changed:
+            return False
+        return elapsed >= self.settings.classifier_min_interval_seconds
 
     async def _apply_classification(
         self,

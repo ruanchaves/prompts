@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
-from app.core.config import Settings
 from app.models.jobs import JobProvider, JobRecord, JobState, RetryPolicy
 from app.services.provider_manager import ProviderManager
 from app.services.recovery import RecoveryService
-from app.services.tmux_manager import TmuxManager
+from app.services.tmux_manager import TmuxManager, TmuxSettings
 
 
 class DummyQueue:
@@ -16,11 +16,8 @@ class DummyQueue:
         self.job = job
         self.saved: list[tuple[JobState, bool | None, bool]] = []
 
-    async def list_jobs(self, limit: int = 10_000):
-        class _Jobs:
-            jobs = [self.job]
-
-        return _Jobs()
+    async def rebuild_indexes(self) -> list[JobRecord]:
+        return [self.job]
 
     async def list_scheduled_job_ids(self) -> set[str]:
         return set()
@@ -32,11 +29,14 @@ class DummyQueue:
 
 
 class DummyTmux:
+    def __init__(self, windows: set[str] | None = None) -> None:
+        self.windows = windows or set()
+
     async def ensure_session(self) -> None:
         return None
 
     async def discover_managed_windows(self) -> set[str]:
-        return set()
+        return self.windows
 
     async def cleanup_job(self, job: JobRecord, *, force: bool = False) -> None:
         return None
@@ -68,6 +68,31 @@ async def test_recovery_requeues_partially_launched_jobs_without_windows() -> No
 
 
 @pytest.mark.asyncio
+async def test_recovery_restores_waiting_for_classifier_back_to_readiness_path() -> None:
+    job = JobRecord(
+        job_id="job-2",
+        provider=JobProvider.CLAUDE,
+        prompt="Investigate",
+        active_prompt="Investigate",
+        priority=50,
+        retry_policy=RetryPolicy(),
+        state=JobState.WAITING_FOR_CLASSIFIER,
+        tmux_window="job-job-2",
+    )
+    queue = DummyQueue(job)
+    recovery = RecoveryService(
+        queue,
+        DummyTmux(windows={"job-job-2"}),
+        ProviderManager(),
+    )
+
+    await recovery.reconcile()
+
+    assert job.state == JobState.WAITING_FOR_PROVIDER_READY
+    assert queue.saved[-1][0] == JobState.WAITING_FOR_PROVIDER_READY
+
+
+@pytest.mark.asyncio
 async def test_tmux_run_without_output_capture_waits_instead_of_communicate(monkeypatch: pytest.MonkeyPatch) -> None:
     class DummyProcess:
         def __init__(self) -> None:
@@ -93,7 +118,13 @@ async def test_tmux_run_without_output_capture_waits_instead_of_communicate(monk
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
 
-    manager = TmuxManager(Settings(enable_background_worker=False, classifier_enabled=False, test_mode=True))
+    tmux_settings = TmuxSettings(
+        tmux_session_name="ai-launcher-manager",
+        tmux_history_lines=200,
+        tmux_cleanup_on_terminal_state=True,
+        app_dir=Path(__file__).resolve().parents[1] / "app",
+    )
+    manager = TmuxManager(tmux_settings)
     code, stdout, stderr = await manager._run("tmux", "new-session", "-d", capture_output=False)
 
     assert code == 0
@@ -104,8 +135,14 @@ async def test_tmux_run_without_output_capture_waits_instead_of_communicate(monk
 
 
 @pytest.mark.asyncio
-async def test_tmux_launch_job_passes_codex_prompt_via_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    manager = TmuxManager(Settings(enable_background_worker=False, classifier_enabled=False, test_mode=True))
+async def test_tmux_launch_job_does_not_pass_codex_prompt_via_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    tmux_settings = TmuxSettings(
+        tmux_session_name="ai-launcher-manager",
+        tmux_history_lines=200,
+        tmux_cleanup_on_terminal_state=True,
+        app_dir=Path(__file__).resolve().parents[1] / "app",
+    )
+    manager = TmuxManager(tmux_settings)
     job = JobRecord(
         job_id="job-1",
         provider=JobProvider.CODEX,
@@ -133,4 +170,4 @@ async def test_tmux_launch_job_passes_codex_prompt_via_environment(monkeypatch: 
 
     await manager.launch_job(job)
 
-    assert "AILM_PROMPT=Review this PR\nFocus on regressions." in recorded["args"]
+    assert all(not arg.startswith("AILM_PROMPT=") for arg in recorded["args"])

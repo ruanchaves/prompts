@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
-from app.core.config import Settings
 from app.models.jobs import JobProvider, JobRecord, JobState, RetryPolicy
 from app.services.provider_manager import ProviderManager
-from app.services.worker import WorkerService
+from app.services.worker import WorkerService, WorkerSettings
 
 
 class DummyQueue:
@@ -55,7 +56,13 @@ class DummyConcurrencyController:
 def make_worker() -> tuple[WorkerService, DummyQueue]:
     queue = DummyQueue()
     worker = WorkerService(
-        settings=Settings(enable_background_worker=False, classifier_enabled=False, test_mode=True),
+        settings=WorkerSettings(
+            scheduler_poll_interval_seconds=3,
+            monitor_poll_interval_seconds=5,
+            worker_id="host-worker-1",
+            worker_execution_target="host",
+            tmux_session_name="ai-launcher-manager",
+        ),
         queue=queue,
         tmux_manager=DummyTmux(),
         session_monitor=DummySessionMonitor(),
@@ -78,21 +85,21 @@ def make_job(provider: JobProvider) -> JobRecord:
 
 
 @pytest.mark.asyncio
-async def test_launch_provider_marks_codex_running_immediately() -> None:
+async def test_launch_provider_keeps_codex_on_readiness_path() -> None:
     worker, queue = make_worker()
     job = make_job(JobProvider.CODEX)
 
     await worker._launch_provider(job)
 
-    assert job.state == JobState.RUNNING
+    assert job.state == JobState.WAITING_FOR_PROVIDER_READY
     assert job.tmux_session == "ai-launcher-manager"
     assert job.tmux_window == "job-job-1"
-    assert job.prompt_attempt_count == 1
-    assert job.provider_ready_at is not None
-    assert job.prompt_sent_at is not None
-    assert job.prompt_confirmed_at is not None
-    assert job.active_prompt is None
-    assert queue.saved[-1][0] == JobState.RUNNING
+    assert job.prompt_attempt_count == 0
+    assert job.provider_ready_at is None
+    assert job.prompt_sent_at is None
+    assert job.prompt_confirmed_at is None
+    assert job.active_prompt == "Review this change"
+    assert queue.saved[-1][0] == JobState.WAITING_FOR_PROVIDER_READY
 
 
 @pytest.mark.asyncio
@@ -109,3 +116,21 @@ async def test_launch_provider_keeps_claude_on_readiness_path() -> None:
     assert job.prompt_confirmed_at is None
     assert job.active_prompt == "Review this change"
     assert queue.saved[-1][0] == JobState.WAITING_FOR_PROVIDER_READY
+
+
+@pytest.mark.asyncio
+async def test_worker_wait_for_failure_raises_background_task_error() -> None:
+    worker, _ = make_worker()
+    worker.failure_future = asyncio.get_running_loop().create_future()
+
+    async def fail() -> None:
+        raise RuntimeError("codex classifier blew up")
+
+    task = asyncio.create_task(fail(), name="monitor-loop")
+    task.add_done_callback(worker._handle_task_completion)
+    await asyncio.sleep(0)
+
+    with pytest.raises(RuntimeError, match="codex classifier blew up"):
+        await worker.wait_for_failure()
+
+    assert worker.stop_event.is_set()

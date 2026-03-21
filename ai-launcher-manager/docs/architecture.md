@@ -23,7 +23,9 @@ This document explains how the system behaves internally in the current host-exe
   - injects prompts
   - terminates or cleans up windows
 - `CompositeSessionClassifier`
-  - uses `codex exec` first and heuristics second
+  - uses `codex --yolo` inside a PTY when the Codex classifier is enabled
+  - falls back to heuristics only when the Codex classifier is explicitly disabled
+  - treats classifier transport and low-confidence failures as fatal worker errors
 - `SessionMonitor`
   - turns tmux snapshots into job-state transitions
 - `ConcurrencyController`
@@ -121,7 +123,6 @@ The full lifecycle is:
 - `waiting_for_provider_ready`
 - `sending_prompt`
 - `running`
-- `waiting_for_classifier`
 - `cancel_requested`
 - `rate_limited`
 - `retrying`
@@ -134,8 +135,13 @@ State interpretation:
 
 - `waiting_for_provider_ready`: provider is running but prompt injection has not happened yet
 - `sending_prompt`: the prompt was injected and acceptance is being confirmed
+- `running`: the provider has accepted the prompt and the worker now throttles classifier calls using the min/max interval settings
 - `cancel_requested`: the API accepted a live cancel and the host worker still needs to kill the tmux window
 - `rate_limited`: the job is parked until `next_retry_at`
+
+Legacy note:
+
+- `waiting_for_classifier` may still appear on old persisted jobs during recovery, but the normal runtime path no longer stores that state
 
 ## Health And Heartbeats
 
@@ -233,7 +239,7 @@ Continue where you left off. The previous attempt was rate limited.
 
 Concurrency is tracked separately for each provider in Redis.
 
-- both providers start at `AILM_INITIAL_CONCURRENCY_PER_PROVIDER`
+- providers start at `AILM_INITIAL_CONCURRENCY_PER_PROVIDER` unless a provider-specific override is set; Codex can start at `AILM_INITIAL_CODEX_CONCURRENCY`
 - successful completions gradually increase limits
 - rate limits and failures reduce limits
 

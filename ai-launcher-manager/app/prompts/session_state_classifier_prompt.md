@@ -1,6 +1,10 @@
 You are classifying the live state of an AI agent session running inside tmux for an AI launcher manager.
 
-Return a single JSON object that matches the provided schema.
+Return exactly one JSON object that matches the provided schema.
+Do not use markdown fences.
+Wrap the JSON object with these exact marker lines:
+- `{marker_start}`
+- `{marker_end}`
 
 Allowed states:
 - waiting_for_provider_ready
@@ -41,6 +45,9 @@ Confidence rules:
 - Use a value between 0 and 1.
 - Lower confidence when output is ambiguous or incomplete.
 - Prefer the least destructive interpretation when uncertain.
+
+Schema:
+{schema}
 
 Context:
 {context}

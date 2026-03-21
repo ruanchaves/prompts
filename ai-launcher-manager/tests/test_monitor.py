@@ -5,7 +5,6 @@ from datetime import timedelta
 
 import pytest
 
-from app.core.config import Settings
 from app.models.jobs import (
     ClassificationResult,
     ClassificationState,
@@ -20,7 +19,7 @@ from app.models.jobs import (
     utcnow,
 )
 from app.services.provider_manager import ProviderManager
-from app.services.session_monitor import SessionMonitor
+from app.services.session_monitor import MonitorSettings, SessionMonitor
 
 
 class DummyQueue:
@@ -55,8 +54,10 @@ class DummyTmux:
 class DummyClassifier:
     def __init__(self, result: ClassificationResult) -> None:
         self.result = result
+        self.calls = 0
 
     async def classify(self, job: JobRecord, snapshot: SessionSnapshot) -> ClassificationResult:
+        self.calls += 1
         return self.result
 
 
@@ -83,25 +84,32 @@ def make_job(state: JobState, provider: JobProvider = JobProvider.CODEX) -> JobR
     )
 
 
-def make_monitor(snapshot: SessionSnapshot, result: ClassificationResult) -> tuple[SessionMonitor, DummyTmux, DummyQueue, DummyConcurrencyController]:
-    settings = Settings(enable_background_worker=False, classifier_enabled=False, test_mode=True)
+def make_monitor(snapshot: SessionSnapshot, result: ClassificationResult) -> tuple[SessionMonitor, DummyTmux, DummyQueue, DummyConcurrencyController, DummyClassifier]:
+    settings = MonitorSettings(
+        classifier_max_output_chars=8000,
+        classifier_min_interval_seconds=30,
+        classifier_max_interval_seconds=300,
+        prompt_delivery_timeout_seconds=20,
+        max_prompt_delivery_attempts=3,
+    )
     queue = DummyQueue()
     tmux = DummyTmux(snapshot)
     concurrency = DummyConcurrencyController()
+    classifier = DummyClassifier(result)
     monitor = SessionMonitor(
         settings=settings,
         queue=queue,
         tmux_manager=tmux,
-        classifier=DummyClassifier(result),
+        classifier=classifier,
         provider_manager=ProviderManager(),
         concurrency_controller=concurrency,
     )
-    return monitor, tmux, queue, concurrency
+    return monitor, tmux, queue, concurrency, classifier
 
 
 @pytest.mark.asyncio
 async def test_waits_for_provider_readiness_before_prompt_injection() -> None:
-    job = make_job(JobState.WAITING_FOR_PROVIDER_READY)
+    job = make_job(JobState.WAITING_FOR_PROVIDER_READY, provider=JobProvider.CLAUDE)
     snapshot = SessionSnapshot(tmux_target="ai-launcher-manager:job-1", recent_output="Welcome")
     result = ClassificationResult(
         state=ClassificationState.READY_FOR_PROMPT,
@@ -111,13 +119,14 @@ async def test_waits_for_provider_readiness_before_prompt_injection() -> None:
         provider_ready=True,
         prompt_accepted=False,
     )
-    monitor, tmux, _, _ = make_monitor(snapshot, result)
+    monitor, tmux, _, _, classifier = make_monitor(snapshot, result)
 
     await monitor.inspect_job(job)
 
     assert tmux.sent_prompts == ["Investigate the failure"]
     assert job.state == JobState.SENDING_PROMPT
     assert job.prompt_attempt_count == 1
+    assert classifier.calls == 0
 
 
 @pytest.mark.asyncio
@@ -134,13 +143,39 @@ async def test_retries_prompt_delivery_if_sent_too_early() -> None:
         provider_ready=True,
         prompt_accepted=False,
     )
-    monitor, tmux, _, _ = make_monitor(snapshot, result)
+    monitor, tmux, _, _, classifier = make_monitor(snapshot, result)
 
     await monitor.inspect_job(job)
 
     assert tmux.sent_prompts == ["Investigate the failure"]
     assert job.prompt_attempt_count == 2
     assert job.state == JobState.SENDING_PROMPT
+    assert classifier.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_codex_does_not_mark_prompt_accepted_on_generic_running_signal() -> None:
+    job = make_job(JobState.SENDING_PROMPT)
+    job.prompt_attempt_count = 1
+    job.prompt_sent_at = utcnow() - timedelta(seconds=5)
+    snapshot = SessionSnapshot(tmux_target="ai-launcher-manager:job-1", recent_output="Prompt is visible in the composer")
+    result = ClassificationResult(
+        state=ClassificationState.RUNNING,
+        confidence=0.7,
+        reason="The prompt text is visible, but there is no agent response yet",
+        suggested_action=SuggestedAction.CONTINUE_MONITORING,
+        provider_ready=True,
+        prompt_accepted=False,
+    )
+    monitor, tmux, _, _, classifier = make_monitor(snapshot, result)
+
+    await monitor.inspect_job(job)
+
+    assert tmux.sent_prompts == []
+    assert job.state == JobState.SENDING_PROMPT
+    assert job.prompt_confirmed_at is None
+    assert job.active_prompt == "Investigate the failure"
+    assert classifier.calls == 1
 
 
 @pytest.mark.asyncio
@@ -183,7 +218,7 @@ async def test_claude_rate_limit_schedules_ai_selected_recovery() -> None:
         recovery_action=RecoveryAction.SEND_CONTINUE_MESSAGE,
         retry_at=retry_at,
     )
-    monitor, tmux, queue, concurrency = make_monitor(snapshot, result)
+    monitor, tmux, queue, concurrency, _ = make_monitor(snapshot, result)
 
     await monitor.inspect_job(job)
 
@@ -207,7 +242,7 @@ async def test_completed_jobs_cleanup_tmux_window() -> None:
         provider_ready=True,
         prompt_accepted=True,
     )
-    monitor, tmux, _, concurrency = make_monitor(snapshot, result)
+    monitor, tmux, _, concurrency, _ = make_monitor(snapshot, result)
 
     await monitor.inspect_job(job)
 
@@ -228,7 +263,7 @@ async def test_cancel_requested_jobs_are_terminated_by_host_worker() -> None:
         provider_ready=True,
         prompt_accepted=True,
     )
-    monitor, tmux, queue, concurrency = make_monitor(snapshot, result)
+    monitor, tmux, queue, concurrency, _ = make_monitor(snapshot, result)
 
     await monitor.inspect_job(job)
 

@@ -57,9 +57,24 @@ async def run_host_worker(env_file: Path | None = None) -> None:
     )
 
     await services.worker.start()
+    stop_task = asyncio.create_task(stop_event.wait(), name="host-worker-stop")
+    failure_task = asyncio.create_task(services.worker.wait_for_failure(), name="host-worker-failure")
     try:
-        await stop_event.wait()
+        done, pending = await asyncio.wait(
+            {stop_task, failure_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+
+        if failure_task in done:
+            try:
+                await failure_task
+            except Exception as exc:
+                logger.critical("Host worker crashed because a background task failed", exc_info=exc)
+                raise RuntimeError(f"Host worker crashed: {exc}") from exc
     finally:
+        await asyncio.gather(stop_task, failure_task, return_exceptions=True)
         logger.info("Stopping host worker %s", settings.worker_id)
         await services.worker.stop()
         await services.redis.aclose()

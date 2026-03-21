@@ -2,15 +2,23 @@ from __future__ import annotations
 
 import asyncio
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
-from app.core.config import Settings
 from app.models.jobs import JobProvider, JobRecord, SessionSnapshot, utcnow
 from app.utils.logging import get_logger
 
 
+@dataclass(frozen=True, slots=True)
+class TmuxSettings:
+    tmux_session_name: str
+    tmux_history_lines: int
+    tmux_cleanup_on_terminal_state: bool
+    app_dir: Path
+
+
 class TmuxManager:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: TmuxSettings) -> None:
         self.settings = settings
         self.logger = get_logger("ai_launcher_manager.tmux")
 
@@ -98,8 +106,24 @@ class TmuxManager:
     async def ensure_session(self) -> None:
         if not await self.session_exists():
             await self._run("tmux", "new-session", "-d", "-s", self.session_name, "-n", "bootstrap", capture_output=False)
-        await self._run("tmux", "set-window-option", "-g", "remain-on-exit", "on", capture_output=False)
-        await self._run("tmux", "set-window-option", "-g", "allow-rename", "off", capture_output=False)
+        await self._run(
+            "tmux",
+            "set-window-option",
+            "-t",
+            self.session_name,
+            "remain-on-exit",
+            "on",
+            capture_output=False,
+        )
+        await self._run(
+            "tmux",
+            "set-window-option",
+            "-t",
+            self.session_name,
+            "allow-rename",
+            "off",
+            capture_output=False,
+        )
 
     async def window_exists(self, window_name: str) -> bool:
         if not await self.session_exists():
@@ -147,9 +171,6 @@ class TmuxManager:
             "bash",
             str(self.wrapper_script),
         ]
-        if job.provider == JobProvider.CODEX and job.active_prompt is not None:
-            launch_args.insert(-2, f"AILM_PROMPT={job.active_prompt}")
-
         await self._run(*launch_args, capture_output=False)
         return self.session_name, window_name
 
