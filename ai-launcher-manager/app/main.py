@@ -18,6 +18,7 @@ from app.services.session_classifier import (
     CompositeSessionClassifier,
     HeuristicSessionClassifier,
 )
+from app.services.monitor_orchestrator import MonitorOrchestrator
 from app.services.session_monitor import SessionMonitor
 from app.services.tmux_manager import TmuxManager
 from app.services.worker import WorkerService
@@ -33,6 +34,7 @@ class AppServices:
     concurrency_controller: ConcurrencyController
     tmux_manager: TmuxManager
     classifier: CompositeSessionClassifier
+    monitor_orchestrator: MonitorOrchestrator
     session_monitor: SessionMonitor
     recovery: RecoveryService
     worker: WorkerService
@@ -49,13 +51,19 @@ def build_services(settings: Settings, redis_client: Redis | None = None) -> App
         primary=CodexCliSessionClassifier(settings, provider_manager),
         fallback=HeuristicSessionClassifier(settings, provider_manager),
     )
+    monitor_orchestrator = MonitorOrchestrator(
+        settings=settings,
+        queue=queue,
+        tmux_manager=tmux_manager,
+        provider_manager=provider_manager,
+        concurrency_controller=concurrency_controller,
+    )
     session_monitor = SessionMonitor(
         settings=settings,
         queue=queue,
         tmux_manager=tmux_manager,
         classifier=classifier,
-        provider_manager=provider_manager,
-        concurrency_controller=concurrency_controller,
+        orchestrator=monitor_orchestrator,
     )
     recovery = RecoveryService(settings, queue, tmux_manager, provider_manager)
     worker = WorkerService(
@@ -75,6 +83,7 @@ def build_services(settings: Settings, redis_client: Redis | None = None) -> App
         concurrency_controller=concurrency_controller,
         tmux_manager=tmux_manager,
         classifier=classifier,
+        monitor_orchestrator=monitor_orchestrator,
         session_monitor=session_monitor,
         recovery=recovery,
         worker=worker,
