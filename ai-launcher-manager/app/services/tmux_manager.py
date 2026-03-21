@@ -75,7 +75,7 @@ class TmuxManager:
             stderr=asyncio.subprocess.PIPE if capture_output else asyncio.subprocess.DEVNULL,
         )
         try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(stdin_text.encode("utf-8")), timeout=timeout)
+            raw_out, raw_err = await asyncio.wait_for(process.communicate(stdin_text.encode("utf-8")), timeout=timeout)
         except asyncio.TimeoutError:
             if process.returncode is None:
                 try:
@@ -85,8 +85,8 @@ class TmuxManager:
             await process.wait()
             raise RuntimeError(f"Command timed out: {' '.join(args)}") from None
 
-        stdout_text = stdout.decode().strip()
-        stderr_text = stderr.decode().strip()
+        stdout_text = (raw_out or b"").decode().strip()
+        stderr_text = (raw_err or b"").decode().strip()
         if check and process.returncode != 0:
             raise RuntimeError(stderr_text or stdout_text or f"Command failed: {' '.join(args)}")
         return process.returncode, stdout_text, stderr_text
