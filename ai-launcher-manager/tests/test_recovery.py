@@ -56,7 +56,6 @@ async def test_recovery_requeues_partially_launched_jobs_without_windows() -> No
     )
     queue = DummyQueue(job)
     recovery = RecoveryService(
-        Settings(enable_background_worker=False, classifier_enabled=False, test_mode=True),
         queue,
         DummyTmux(),
         ProviderManager(),
@@ -102,3 +101,36 @@ async def test_tmux_run_without_output_capture_waits_instead_of_communicate(monk
     assert stderr == ""
     assert process.wait_called is True
     assert process.communicate_called is False
+
+
+@pytest.mark.asyncio
+async def test_tmux_launch_job_passes_codex_prompt_via_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    manager = TmuxManager(Settings(enable_background_worker=False, classifier_enabled=False, test_mode=True))
+    job = JobRecord(
+        job_id="job-1",
+        provider=JobProvider.CODEX,
+        prompt="Review this PR\nFocus on regressions.",
+        active_prompt="Review this PR\nFocus on regressions.",
+        priority=50,
+        retry_policy=RetryPolicy(),
+    )
+
+    recorded: dict[str, tuple[str, ...]] = {}
+
+    async def fake_ensure_session() -> None:
+        return None
+
+    async def fake_window_exists(window_name: str) -> bool:
+        return False
+
+    async def fake_run(*args: str, **kwargs):
+        recorded["args"] = args
+        return 0, "", ""
+
+    monkeypatch.setattr(manager, "ensure_session", fake_ensure_session)
+    monkeypatch.setattr(manager, "window_exists", fake_window_exists)
+    monkeypatch.setattr(manager, "_run", fake_run)
+
+    await manager.launch_job(job)
+
+    assert "AILM_PROMPT=Review this PR\nFocus on regressions." in recorded["args"]

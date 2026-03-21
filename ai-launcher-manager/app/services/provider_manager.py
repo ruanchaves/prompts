@@ -14,6 +14,9 @@ class ProviderManager:
     def launch_command_display(self, provider: JobProvider) -> str:
         return " ".join(self.launch_command_args(provider))
 
+    def delivers_initial_prompt_on_launch(self, provider: JobProvider) -> bool:
+        return provider == JobProvider.CODEX
+
     def default_prompt_for_job(self, job: JobRecord) -> str:
         return job.prompt
 

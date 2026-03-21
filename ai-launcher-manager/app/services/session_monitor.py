@@ -7,6 +7,7 @@ from app.core.config import Settings
 from app.models.jobs import (
     ClassificationResult,
     ClassificationState,
+    JobProvider,
     JobRecord,
     JobState,
     ProviderHealthEvent,
@@ -130,7 +131,10 @@ class SessionMonitor:
             return
 
         if previous_state == JobState.SENDING_PROMPT:
-            if result.prompt_accepted or result.state == ClassificationState.RUNNING:
+            prompt_accepted = result.prompt_accepted or (
+                job.provider == JobProvider.CLAUDE and result.state == ClassificationState.RUNNING
+            )
+            if prompt_accepted:
                 job.prompt_confirmed_at = utcnow()
                 job.active_prompt = None
                 self._transition_if_needed(job, JobState.RUNNING, result.reason, result.source, previous_state)

@@ -144,6 +144,30 @@ async def test_retries_prompt_delivery_if_sent_too_early() -> None:
 
 
 @pytest.mark.asyncio
+async def test_codex_does_not_mark_prompt_accepted_on_generic_running_signal() -> None:
+    job = make_job(JobState.SENDING_PROMPT)
+    job.prompt_attempt_count = 1
+    job.prompt_sent_at = utcnow() - timedelta(seconds=5)
+    snapshot = SessionSnapshot(tmux_target="ai-launcher-manager:job-1", recent_output="Prompt is visible in the composer")
+    result = ClassificationResult(
+        state=ClassificationState.RUNNING,
+        confidence=0.7,
+        reason="The prompt text is visible, but there is no agent response yet",
+        suggested_action=SuggestedAction.CONTINUE_MONITORING,
+        provider_ready=True,
+        prompt_accepted=False,
+    )
+    monitor, tmux, _, _ = make_monitor(snapshot, result)
+
+    await monitor.inspect_job(job)
+
+    assert tmux.sent_prompts == []
+    assert job.state == JobState.SENDING_PROMPT
+    assert job.prompt_confirmed_at is None
+    assert job.active_prompt == "Investigate the failure"
+
+
+@pytest.mark.asyncio
 async def test_claude_rate_limit_schedules_ai_selected_recovery() -> None:
     job = make_job(JobState.RUNNING, provider=JobProvider.CLAUDE)
     job.prompt_confirmed_at = utcnow()

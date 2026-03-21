@@ -137,13 +137,14 @@ class HeuristicSessionClassifier:
 
         if job.state == JobState.SENDING_PROMPT:
             if job.prompt_sent_at and job.last_output_at and job.last_output_at > job.prompt_sent_at:
+                prompt_accepted = job.provider == JobProvider.CLAUDE
                 return ClassificationResult(
                     state=ClassificationState.RUNNING,
                     confidence=0.68,
                     reason="session output changed after prompt injection",
                     suggested_action=SuggestedAction.CONTINUE_MONITORING,
                     provider_ready=True,
-                    prompt_accepted=True,
+                    prompt_accepted=prompt_accepted,
                     source="heuristic",
                 )
 

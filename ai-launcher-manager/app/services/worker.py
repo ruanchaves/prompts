@@ -188,6 +188,21 @@ class WorkerService:
         job.tmux_window = window_name
         job.failure_reason = None
         job.recovery_action = RecoveryAction.NONE
+        if self.provider_manager.delivers_initial_prompt_on_launch(job.provider):
+            delivered_at = utcnow()
+            job.provider_ready_at = delivered_at
+            job.prompt_sent_at = delivered_at
+            job.prompt_confirmed_at = delivered_at
+            job.prompt_attempt_count = 1
+            job.active_prompt = None
+            job.transition(
+                JobState.RUNNING,
+                "Provider launched with its initial prompt attached; monitoring execution",
+                "scheduler",
+            )
+            await self.queue.save_job(job)
+            return
+
         job.transition(
             JobState.WAITING_FOR_PROVIDER_READY,
             "Provider launched; waiting for readiness before prompt injection",

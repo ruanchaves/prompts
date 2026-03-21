@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 
 from app.core.config import Settings
-from app.models.jobs import JobRecord, SessionSnapshot, utcnow
+from app.models.jobs import JobProvider, JobRecord, SessionSnapshot, utcnow
 from app.utils.logging import get_logger
 
 
@@ -133,7 +133,7 @@ class TmuxManager:
         if await self.window_exists(window_name):
             await self.kill_window(window_name)
 
-        await self._run(
+        launch_args = [
             "tmux",
             "new-window",
             "-d",
@@ -146,8 +146,11 @@ class TmuxManager:
             f"AILM_PROVIDER={job.provider.value}",
             "bash",
             str(self.wrapper_script),
-            capture_output=False,
-        )
+        ]
+        if job.provider == JobProvider.CODEX and job.active_prompt is not None:
+            launch_args.insert(-2, f"AILM_PROMPT={job.active_prompt}")
+
+        await self._run(*launch_args, capture_output=False)
         return self.session_name, window_name
 
     async def capture_snapshot(self, job: JobRecord) -> SessionSnapshot | None:

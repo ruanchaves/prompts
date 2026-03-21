@@ -9,4 +9,6 @@ def test_provider_manager_uses_fixed_launch_commands() -> None:
 
     assert manager.launch_command_display(JobProvider.CODEX) == "codex --yolo"
     assert manager.launch_command_display(JobProvider.CLAUDE) == "claude --dangerously-skip-permissions"
+    assert manager.delivers_initial_prompt_on_launch(JobProvider.CODEX) is True
+    assert manager.delivers_initial_prompt_on_launch(JobProvider.CLAUDE) is False
     assert "rate limited" in manager.CONTINUE_MESSAGE.lower()
