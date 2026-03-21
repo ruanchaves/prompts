@@ -1,70 +1,95 @@
 # Agent Runbook
 
-This document is the primary operating guide for an AI agent or human operator. If you follow this runbook, you should not need to read the source code to use the system safely.
+This is the main operator guide for the current deployment model.
+
+If you follow this runbook, you should be able to operate the service without reading the source code.
 
 ## Goal
 
-Use the app to:
+Use the system to:
 
-1. start the stack
-2. submit prompt jobs
-3. monitor job progress
-4. inspect runtime state
-5. understand failures and rate limits
-6. retry, cancel, or recover jobs
+1. start the Docker API and Redis
+2. start the host worker
+3. submit prompt jobs
+4. monitor job progress
+5. inspect host tmux state
+6. handle retries, cancellations, rate limits, and recovery
 
 ## Mental Model
 
-One API process does all of the following:
+The system is split into two runtimes:
 
-- accepts jobs over HTTP
-- stores job records and schedules in Redis
-- launches provider CLIs inside `tmux`
-- uses `codex` to determine whether sessions are ready, running, stuck, rate-limited, or complete
-- increases or decreases concurrency per provider over time
+- Docker runtime:
+  - FastAPI API
+  - Redis
+- Host runtime:
+  - worker loops
+  - managed `tmux` session
+  - `codex` and `claude` CLI execution
 
-Each job corresponds to one tmux window inside one managed tmux session.
+Redis is the shared coordination layer between them.
+
+Operational consequence:
+
+- if Docker is up but the host worker is down, the API still responds but jobs do not execute
+- if the host worker is up but Redis is unavailable, the worker cannot lease or update jobs
 
 ## Preconditions
 
-Before starting the stack, verify:
+Before starting anything, verify:
 
 - Docker is installed and running
 - `docker compose` works
-- the host has valid credentials for:
-  - `codex`
-  - `claude`
-- the auth paths used by `docker-compose.yml` exist:
-  - `${HOME}/.codex`
-  - `${HOME}/.config/claude`
+- the project virtualenv exists
+- the host has working `tmux`
+- the host has working `codex`
+- the host has working `claude`
+- provider auth is already valid on the host
 
-If Claude or Codex auth is missing, the provider may launch and then immediately fail inside tmux.
+Quick host-side checks:
+
+```bash
+tmux -V
+codex --version
+claude --version
+```
+
+If provider auth fails from the host shell, fix that first. Docker no longer carries provider auth mounts.
 
 ## Start The Stack
 
-From the project directory:
+Start Docker services:
 
 ```bash
 cd ai-launcher-manager
-docker compose up --build
+docker compose up -d --build
 ```
 
-Important:
+Start the host worker:
 
-- `docker-compose.yml` currently points the container env to `.env.example`
-- if you want different settings, edit `.env.example` or adjust the compose file
-- Redis is published on host port `6381`, not `6379`
-- inside the Compose network the API still connects to Redis at `redis:6379`
+```bash
+cd ai-launcher-manager
+.venv/bin/python -m app.host_worker --env-file .env.host.example
+```
+
+Important facts:
+
+- `.env.example` configures the Docker API container
+- `.env.host.example` configures the host worker
+- Redis is published on host port `6381`
+- API is published on host port `8003`
+- inside Docker, the API still uses `redis:6379`
+- on the host, the worker uses `localhost:6381`
 
 ## Verify The Stack
 
-Check API health:
+Check health:
 
 ```bash
-curl http://localhost:8000/health
+curl http://localhost:8003/health
 ```
 
-Expected shape:
+Healthy example:
 
 ```json
 {
@@ -75,22 +100,34 @@ Expected shape:
 }
 ```
 
+Health interpretation:
+
+- `status: ok`
+  - Redis is reachable and at least one worker reports a healthy tmux session
+- `status: degraded` with `tmux: worker_missing`
+  - the API is up, but no host worker heartbeat is present
+- `status: degraded` with `tmux: host_missing`
+  - a worker heartbeat exists, but it is not reporting a live managed tmux session
+
 Check worker heartbeats:
 
 ```bash
-curl http://localhost:8000/workers
+curl http://localhost:8003/workers
 ```
 
 Check metrics:
 
 ```bash
-curl http://localhost:8000/metrics
+curl http://localhost:8003/metrics
 ```
 
-What to look for:
+What to inspect:
 
-- `counts_by_state`: current system load by job state
-- `provider_concurrency`: separate adaptive limits for `codex` and `claude`
+- `worker_count`
+- `details.execution_target`
+- `details.tmux_session_exists`
+- `counts_by_state`
+- `provider_concurrency`
 
 ## Submit A Job
 
@@ -100,12 +137,12 @@ Send only:
 - `prompt`
 - optional priority / retry policy / metadata
 
-Do not send a raw shell command. The service will ignore that contract and reject invalid payloads.
+Do not send raw shell commands.
 
 Example:
 
 ```bash
-curl -X POST http://localhost:8000/jobs \
+curl -X POST http://localhost:8003/jobs \
   -H 'Content-Type: application/json' \
   -d '{
     "provider": "claude",
@@ -119,32 +156,37 @@ curl -X POST http://localhost:8000/jobs \
 
 ## What Happens After Submission
 
-The job lifecycle is:
+The normal job lifecycle is:
 
 1. `queued`
 2. `launching`
 3. `waiting_for_provider_ready`
 4. `sending_prompt`
 5. `running`
-6. terminal or retry path:
+6. one of:
    - `rate_limited`
    - `retrying`
    - `completed`
    - `failed`
    - `stuck`
+   - `cancel_requested`
    - `cancelled`
 
-The key point is that the app does not send the prompt immediately after launching the provider. It waits until the classifier believes the provider is ready.
+The key behavior is unchanged:
+
+- the worker first launches the fixed provider command
+- it waits for readiness
+- it injects the prompt only after readiness is confirmed
 
 ## Poll A Job
 
 Inspect one job:
 
 ```bash
-curl http://localhost:8000/jobs/<job-id>
+curl http://localhost:8003/jobs/<job-id>
 ```
 
-Fields you should pay attention to:
+Fields to watch:
 
 - `state`
 - `provider`
@@ -167,12 +209,11 @@ Fields you should pay attention to:
 
 Interpretation:
 
-- `attempt_count`: number of provider launch attempts
-- `prompt_attempt_count`: number of prompt send attempts for the current session
-- `active_prompt`: pending prompt that will be sent next
-- `recovery_action`: what the app plans to do after a rate limit or recovery event
+- `cancel_requested` means the API accepted a live cancel request and the host worker still needs to kill the tmux window
+- `rate_limited` means the job is intentionally parked until `next_retry_at`
+- `tmux_session` and `tmux_window` refer to host tmux, not Docker tmux
 
-## Inspect tmux Directly
+## Inspect Host tmux Directly
 
 The managed tmux session name defaults to:
 
@@ -186,13 +227,13 @@ List windows:
 tmux list-windows -t ai-launcher-manager
 ```
 
-Capture pane output for one job window:
+Capture output for one job window:
 
 ```bash
 tmux capture-pane -p -t ai-launcher-manager:job-<job-id> -S -200
 ```
 
-Attach to the full session:
+Attach to the session:
 
 ```bash
 tmux attach -t ai-launcher-manager
@@ -201,73 +242,68 @@ tmux attach -t ai-launcher-manager
 Operational rule:
 
 - completed windows should not remain indefinitely
-- if a completed window is still present, inspect the job state and recent output
+- if a completed window is still present, treat that as a host worker cleanup issue
 
-## How Readiness And Prompt Injection Work
+## Readiness And Prompt Injection
 
-The service always launches one of these exact commands:
+The worker always launches one of these exact commands on the host:
 
 - `codex --yolo`
 - `claude --dangerously-skip-permissions`
 
-Then it classifies the live terminal output.
+Then it classifies live tmux output.
 
-If the classifier believes the provider is not ready:
+If the provider is not ready:
 
-- the job stays in `waiting_for_provider_ready`
+- the job remains in `waiting_for_provider_ready`
 
-If the classifier believes the provider is ready:
+If the provider is ready:
 
-- the service injects the pending prompt through tmux buffers
+- the worker injects the pending prompt through tmux buffers
 - the job moves to `sending_prompt`
 
-If the prompt appears accepted:
+If prompt acceptance is confirmed:
 
 - the job moves to `running`
 
-If the prompt appears to have been sent too early:
+If the prompt appears to have been injected too early:
 
-- the job remains on the prompt-delivery path
-- the service retries prompt delivery up to `AILM_MAX_PROMPT_DELIVERY_ATTEMPTS`
+- the worker retries prompt delivery up to the configured limit
 
 ## Claude Rate-Limit Handling
 
-Claude can stop in a state that requires a manual continue path. The message text may vary. The system uses `codex` to infer:
+Claude rate-limit handling still works through Codex-based interpretation.
 
-- whether the message is actually a rate-limit / continue state
-- what retry time should be used in local time
-- whether recovery should be:
-  - `press_continue`
-  - `send_continue_message`
-  - `relaunch_provider`
+The worker uses Codex to decide:
 
-When the selected recovery action is `send_continue_message`, the service sends:
+- whether Claude is in a continue-required limit state
+- what local retry time should be used
+- whether to:
+  - press continue
+  - send the continue message
+  - relaunch the provider
+
+The continue message is:
 
 ```text
 Continue where you left off. The previous attempt was rate limited.
 ```
 
-How to inspect this:
+Inspect these fields:
 
-- check `classifier_result`
-- check `recovery_action`
-- check `next_retry_at`
-- check `last_rate_limit_at`
+- `classifier_result`
+- `recovery_action`
+- `next_retry_at`
+- `last_rate_limit_at`
 
 ## Adaptive Concurrency
 
-The app keeps a separate concurrency record for each provider.
+Concurrency is still tracked separately per provider.
 
-Default behavior:
-
-- start at `AILM_INITIAL_CONCURRENCY_PER_PROVIDER`
-- increase after repeated successful completions
-- decrease after rate limits, launch failures, stuck jobs, or failures
-
-Check current values:
+Check it with:
 
 ```bash
-curl http://localhost:8000/metrics
+curl http://localhost:8003/metrics
 ```
 
 Then inspect:
@@ -285,109 +321,72 @@ Then inspect:
 Cancel a job:
 
 ```bash
-curl -X POST http://localhost:8000/jobs/<job-id>/cancel
+curl -X POST http://localhost:8003/jobs/<job-id>/cancel
 ```
 
-Retry a job manually:
+Cancel behavior:
+
+- queued or not-yet-running jobs move directly to `cancelled`
+- active jobs move to `cancel_requested`
+- the host worker then terminates the tmux session and finalizes `cancelled`
+
+Retry a job:
 
 ```bash
-curl -X POST http://localhost:8000/jobs/<job-id>/retry
+curl -X POST http://localhost:8003/jobs/<job-id>/retry
 ```
 
-Manual retry behavior:
+Retry behavior:
 
-- resets prompt-delivery counters
-- clears readiness timestamps
-- requeues the original prompt
-- attempts a fresh provider lifecycle
+- active jobs cannot be retried directly
+- non-running jobs are requeued with prompt-delivery counters reset
+- stale host windows are cleaned up on the next launch if necessary
 
 ## Restart Recovery
 
-If the API process restarts:
+If the API container restarts:
 
-- queued jobs are re-scheduled if needed
-- rate-limited jobs remain scheduled
-- active jobs with existing windows are preserved
-- active jobs whose windows disappeared are requeued if retries remain
-- finished windows are removed for terminal jobs
+- queued data remains in Redis
+- host tmux windows remain on the host
+- the host worker can continue processing once Redis/API are reachable again
 
-After a restart, the first checks should be:
+If the host worker restarts:
+
+- it re-adopts the managed tmux session
+- it reconciles jobs with existing host windows
+- it finalizes pending cancellations
+- it requeues missing active windows when retries remain
+
+After any restart, first run:
 
 ```bash
-curl http://localhost:8000/health
-curl http://localhost:8000/workers
-curl http://localhost:8000/jobs
+curl http://localhost:8003/health
+curl http://localhost:8003/workers
+curl http://localhost:8003/jobs
 ```
-
-## Environment Settings
-
-The main settings in `.env.example` are:
-
-- `AILM_REDIS_URL`: Redis connection string
-- `AILM_SCHEDULER_POLL_INTERVAL_SECONDS`: how often the scheduler looks for work
-- `AILM_MONITOR_POLL_INTERVAL_SECONDS`: how often the monitor re-checks active sessions
-- `AILM_TMUX_SESSION_NAME`: top-level tmux session name
-- `AILM_TMUX_HISTORY_LINES`: number of lines captured for classification
-- `AILM_TMUX_CLEANUP_ON_TERMINAL_STATE`: whether terminal windows are killed automatically
-- `AILM_CLASSIFIER_ENABLED`: disable only for debugging fallback behavior
-- `AILM_CLASSIFIER_COMMAND`: classifier executable, usually `codex`
-- `AILM_CLASSIFIER_TIMEOUT_SECONDS`: max duration for one classification call
-- `AILM_CLASSIFIER_MIN_CONFIDENCE`: fallback threshold
-- `AILM_PROMPT_DELIVERY_TIMEOUT_SECONDS`: timeout before prompt send is treated as failed
-- `AILM_MAX_PROMPT_DELIVERY_ATTEMPTS`: prompt send retries before failure
-- `AILM_INITIAL_CONCURRENCY_PER_PROVIDER`: starting provider limit
-- `AILM_MIN_CONCURRENCY_PER_PROVIDER`: floor for adaptive backoff
-- `AILM_MAX_CONCURRENCY_PER_PROVIDER`: cap for adaptive growth
-- `AILM_CONCURRENCY_INCREASE_AFTER_SUCCESSES`: completions required before increasing limit
-- `AILM_CONCURRENCY_DECREASE_STEP`: how much to reduce after unhealthy events
-- `AILM_LOCAL_TIMEZONE`: timezone used for rate-limit retry interpretation
 
 ## Troubleshooting
 
-Symptom: `/health` shows `tmux: missing`
+Symptom: `/health` shows `worker_missing`
 
-- the worker may not have created the managed tmux session yet
-- wait one scheduler cycle and check again
-- if it persists, inspect container logs
+- start the host worker
+- confirm the worker can reach Redis at `localhost:6381`
+- check `/workers` again
 
-Symptom: jobs stay in `waiting_for_provider_ready`
+Symptom: `/health` shows `host_missing`
 
-- inspect `last_output`
-- inspect the tmux pane directly
-- check whether provider auth or startup prompts are blocking
-- confirm `codex` classifier access still works
+- the worker is alive but not reporting a tmux session
+- inspect the host worker logs
+- run `tmux list-sessions` on the host
 
-Symptom: jobs bounce between `sending_prompt` and retry behavior
+Symptom: jobs stay `queued`
 
-- the provider is likely not actually ready when the prompt is injected
-- inspect `last_output`
-- inspect `prompt_attempt_count`
-- consider increasing `AILM_PROMPT_DELIVERY_TIMEOUT_SECONDS`
+- verify the host worker is running
+- verify `/workers` is non-empty
+- verify Redis is reachable on `6381`
 
-Symptom: many `rate_limited` Claude jobs
+Symptom: jobs fail immediately after launch
 
-- inspect `/metrics`
-- verify `provider_concurrency` is backing off
-- inspect one job’s `classifier_result` and `next_retry_at`
-
-Symptom: completed jobs still have tmux windows
-
-- this should not be normal
-- inspect job state
-- inspect worker logs
-- manually list windows in the managed tmux session
-
-Symptom: no worker heartbeat
-
-- check `/workers`
-- inspect container logs
-- verify the FastAPI process is still running with background work enabled
-
-## When To Read The Code Anyway
-
-You should not need the code for normal operation. Read the code only if:
-
-- the documented API behavior does not match the live responses
-- the classifier is returning malformed data repeatedly
-- tmux behavior differs from the runbook
-- a new provider is being added
+- inspect the host tmux window
+- confirm provider auth from the host shell
+- confirm `codex` and `claude` work outside Docker

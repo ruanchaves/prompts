@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     monitor_poll_interval_seconds: int = Field(default=5, ge=1, le=300)
     enable_background_worker: bool = True
     worker_id: str = "worker-1"
+    worker_execution_target: str = "container"
 
     tmux_session_name: str = "ai-launcher-manager"
     tmux_history_lines: int = Field(default=200, ge=50, le=5000)

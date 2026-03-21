@@ -89,12 +89,15 @@ class WorkerService:
                 provider.value: await self.queue.count_active_jobs_by_provider(provider)
                 for provider in JobProvider
             }
+            tmux_session_exists = await self.tmux_manager.session_exists()
             heartbeat = WorkerHeartbeat(
                 worker_id=self.settings.worker_id,
                 updated_at=utcnow(),
                 active_jobs=active_jobs,
                 details={
+                    "execution_target": self.settings.worker_execution_target,
                     "tmux_session_name": self.settings.tmux_session_name,
+                    "tmux_session_exists": tmux_session_exists,
                     "provider_limits": limits,
                     "active_by_provider": active_by_provider,
                 },

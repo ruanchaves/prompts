@@ -15,9 +15,23 @@ def _services(request: Request):
 async def health(request: Request) -> HealthResponse:
     services = _services(request)
     redis_status = "ok" if await services.queue.ping() else "error"
-    tmux_status = "ok" if await services.tmux_manager.session_exists() else "missing"
     workers = await services.queue.list_workers()
-    return HealthResponse(status="ok", redis=redis_status, tmux=tmux_status, worker_count=len(workers))
+    if services.settings.enable_background_worker:
+        tmux_status = "ok" if await services.tmux_manager.session_exists() else "missing"
+    elif not workers:
+        tmux_status = "worker_missing"
+    elif any(worker.details.get("tmux_session_exists") for worker in workers):
+        tmux_status = "ok"
+    else:
+        tmux_status = "host_missing"
+
+    status = "ok"
+    if redis_status != "ok":
+        status = "error"
+    elif tmux_status != "ok":
+        status = "degraded"
+
+    return HealthResponse(status=status, redis=redis_status, tmux=tmux_status, worker_count=len(workers))
 
 
 @router.get("/workers", response_model=list[WorkerHeartbeat])

@@ -16,14 +16,13 @@ services:
       - .env.example
     environment:
       AILM_REDIS_URL: redis://redis:6379/0
+      AILM_ENABLE_BACKGROUND_WORKER: "false"
     ports:
-      - "8000:8000"
+      - "8003:8000"
     depends_on:
       - redis
     volumes:
       - ./:/app
-      - ${HOME}/.codex:/root/.codex:ro
-      - ${HOME}/.config/claude:/root/.config/claude:ro
 
 volumes:
   redis-data:

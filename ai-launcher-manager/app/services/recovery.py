@@ -36,6 +36,14 @@ class RecoveryService:
                     await self.tmux_manager.cleanup_job(job, force=True)
                 continue
 
+            if job.state == JobState.CANCEL_REQUESTED:
+                await self.tmux_manager.terminate_job(job)
+                job.next_retry_at = None
+                job.failure_reason = None
+                job.transition(JobState.CANCELLED, "Recovered pending cancellation after restart", "recovery")
+                await self.queue.save_job(job, unschedule=True)
+                continue
+
             if job.state in {JobState.QUEUED, JobState.RETRYING, JobState.RATE_LIMITED}:
                 if job.job_id not in scheduled_ids:
                     if job.next_retry_at is None:

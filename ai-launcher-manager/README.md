@@ -1,70 +1,89 @@
 # AI Launcher Manager
 
-`AI Launcher Manager` is a Dockerized FastAPI service that queues prompt-based `claude` and `codex` jobs in Redis, launches fixed interactive provider sessions inside `tmux`, waits for provider readiness, injects prompts only after readiness is confirmed, and monitors each session until it completes, retries, rate-limits, or fails.
+`AI Launcher Manager` is a prompt-queueing FastAPI service for `codex` and `claude` jobs.
 
-This project is designed to be operable without reading the code. An operator or agent should be able to start the stack, submit jobs, inspect progress, understand state transitions, diagnose failures, and recover the system by reading the docs below.
+The queue and API run in Docker. The actual provider execution runs on the host through a standalone worker process. That host worker owns `tmux`, launches `codex --yolo` or `claude --dangerously-skip-permissions`, monitors session output, classifies runtime state with Codex, and cleans up finished windows.
+
+This split exists on purpose:
+
+- the API remains easy to run in Docker
+- provider auth stays on the host
+- `tmux`, `codex`, and `claude` do not need to run inside the container
 
 ## Read This First
 
 Read the docs in this order:
 
-1. `README.md` for setup and navigation
-2. [docs/agent-runbook.md](docs/agent-runbook.md) for end-to-end operation
-3. [docs/api-reference.md](docs/api-reference.md) for exact request/response contracts
-4. [docs/architecture.md](docs/architecture.md) for lifecycle, recovery, and concurrency behavior
+1. `README.md`
+2. [docs/host-worker.md](docs/host-worker.md)
+3. [docs/agent-runbook.md](docs/agent-runbook.md)
+4. [docs/api-reference.md](docs/api-reference.md)
+5. [docs/architecture.md](docs/architecture.md)
 
-## What The App Does
+## Execution Model
 
-- Accepts jobs through an HTTP API
-- Stores queue and state in Redis
-- Launches one dedicated `tmux` window per job
-- Always uses fixed provider commands:
-  - `codex --yolo`
-  - `claude --dangerously-skip-permissions`
-- Waits until the provider is ready before sending the prompt
-- Uses `codex exec` as the primary runtime classifier for:
-  - provider readiness
-  - prompt-acceptance confirmation
-  - Claude rate-limit / continue detection
-  - terminal-state detection
-- Adjusts concurrency separately for `codex` and `claude`
-- Cleans up completed tmux windows automatically
+- Docker Compose starts:
+  - `redis`
+  - `api`
+- The host starts:
+  - `python -m app.host_worker`
+- Redis is the boundary between them.
+- The API never launches provider CLIs directly in Docker.
+- The host worker is the only process that should touch managed tmux sessions.
 
 ## Quick Start
 
-1. Review the environment settings in [ai-launcher-manager/.env.example](/mnt/c/Users/ruan.rodrigues/Documents/GitHub/prompts/ai-launcher-manager/.env.example).
-2. Make sure the host machine has working auth for both CLIs if you plan to use them.
-3. Start the stack:
+1. Verify host prerequisites:
+   - `tmux` is installed on the host
+   - `codex` is installed and authenticated on the host
+   - `claude` is installed and authenticated on the host
+   - the project virtualenv exists, or install dependencies first
+2. Start Docker services:
 
 ```bash
 cd ai-launcher-manager
-docker compose up --build
+docker compose up -d --build
 ```
 
-Redis port note:
-
-- the Redis container now publishes on host port `6381`
-- inside the Docker network it still listens on `6379`
-- the API container continues to use `redis:6379`
-
-4. Confirm health:
+3. Start the host worker in another shell:
 
 ```bash
-curl http://localhost:8000/health
-curl http://localhost:8000/metrics
-curl http://localhost:8000/workers
+cd ai-launcher-manager
+.venv/bin/python -m app.host_worker --env-file .env.host.example
 ```
 
-5. Open the generated API docs:
+4. Verify health and worker heartbeat:
 
-- `http://localhost:8000/docs`
+```bash
+curl http://localhost:8003/health
+curl http://localhost:8003/workers
+curl http://localhost:8003/metrics
+```
+
+5. Open the API docs:
+
+- `http://localhost:8003/docs`
+
+## Ports And Env Files
+
+- API host port: `8003`
+- Redis host port: `6381`
+- Docker API env file: `.env.example`
+- Host worker env file: `.env.host.example`
+
+Important details:
+
+- inside Docker, the API still connects to Redis at `redis:6379`
+- on the host, the worker connects to Redis at `localhost:6381`
+- `.env.example` disables the embedded background worker in the API container
+- `.env.host.example` enables the host worker and points it at host Redis
 
 ## Minimal Operating Example
 
 Create a job:
 
 ```bash
-curl -X POST http://localhost:8000/jobs \
+curl -X POST http://localhost:8003/jobs \
   -H 'Content-Type: application/json' \
   -d '{
     "provider": "codex",
@@ -76,40 +95,42 @@ curl -X POST http://localhost:8000/jobs \
 List jobs:
 
 ```bash
-curl http://localhost:8000/jobs
+curl http://localhost:8003/jobs
 ```
 
-Inspect a single job:
+Inspect one job:
 
 ```bash
-curl http://localhost:8000/jobs/<job-id>
+curl http://localhost:8003/jobs/<job-id>
 ```
 
 Cancel a job:
 
 ```bash
-curl -X POST http://localhost:8000/jobs/<job-id>/cancel
+curl -X POST http://localhost:8003/jobs/<job-id>/cancel
 ```
 
 Retry a job:
 
 ```bash
-curl -X POST http://localhost:8000/jobs/<job-id>/retry
+curl -X POST http://localhost:8003/jobs/<job-id>/retry
 ```
 
 ## Important Operational Notes
 
-- The API is prompt-based. Do not send raw shell commands to `/jobs`.
-- The service currently reads runtime settings from `.env.example` because `docker-compose.yml` references that file directly.
-- The worker runs inside the FastAPI process. There is no separate worker container.
-- The main managed tmux session is named by `AILM_TMUX_SESSION_NAME`, which defaults to `ai-launcher-manager`.
-- Finished tmux windows are expected to disappear automatically. If they do not, treat that as an operational issue.
+- The API is prompt-based. Do not submit raw shell commands to `/jobs`.
+- If the host worker is not running, jobs remain queued and `/health` reports a degraded state.
+- Provider auth now comes entirely from the host environment, not from Docker volume mounts.
+- A live cancel of an active job first moves the job to `cancel_requested`; the host worker then kills the tmux window and finalizes `cancelled`.
+- The managed tmux session name defaults to `ai-launcher-manager`.
+- Finished tmux windows should disappear automatically. If they do not, treat that as an operational issue on the host worker side.
 
 ## Documentation Map
 
-- [docs/agent-runbook.md](docs/agent-runbook.md): how to operate the app without reading code
-- [docs/api-reference.md](docs/api-reference.md): endpoints, payloads, fields, and example JSON
-- [docs/architecture.md](docs/architecture.md): launch lifecycle, state machine, classifier contract, concurrency policy, and recovery
+- [docs/host-worker.md](docs/host-worker.md): exact host worker startup and inspection flow
+- [docs/agent-runbook.md](docs/agent-runbook.md): end-to-end operation guide
+- [docs/api-reference.md](docs/api-reference.md): endpoints, payloads, fields, and health semantics
+- [docs/architecture.md](docs/architecture.md): queue model, worker split, lifecycle, recovery, and concurrency behavior
 
 ## Local Development
 
@@ -117,7 +138,7 @@ Install dependencies:
 
 ```bash
 cd ai-launcher-manager
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -e '.[dev]'
 ```
@@ -128,6 +149,12 @@ Run the API locally:
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
+Run the host worker locally against Docker Redis:
+
+```bash
+AILM_REDIS_URL=redis://localhost:6381/0 .venv/bin/python -m app.host_worker
+```
+
 Run tests:
 
 ```bash
@@ -136,7 +163,7 @@ pytest
 
 ## Assumptions And Limits
 
-- `codex` and `claude` CLIs must be installed and authenticated in the runtime environment.
-- The codex-based classifier is the main interpreter, but deterministic fallbacks still exist.
-- The service is an MVP and runs scheduling, monitoring, and recovery loops in one FastAPI process.
-- Exact provider output can vary over time, so the docs describe behavior and contracts rather than brittle string matches.
+- The host worker is now required for provider execution.
+- `codex` and `claude` must be installed and authenticated on the host.
+- The codex-based classifier remains the main interpreter for readiness, prompt acceptance, Claude rate limits, and terminal-state detection.
+- The service is still an MVP: one API process plus one or more host workers using Redis for coordination.

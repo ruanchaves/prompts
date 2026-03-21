@@ -42,6 +42,15 @@ class SessionMonitor:
         self.logger = get_logger("ai_launcher_manager.monitor")
 
     async def inspect_job(self, job: JobRecord) -> JobRecord:
+        if job.state == JobState.CANCEL_REQUESTED:
+            await self.tmux_manager.terminate_job(job)
+            job.next_retry_at = None
+            job.failure_reason = None
+            job.recovery_action = RecoveryAction.NONE
+            job.transition(JobState.CANCELLED, "Job cancelled by operator and host tmux session terminated", "monitor")
+            await self.queue.save_job(job, unschedule=True)
+            return job
+
         snapshot = await self.tmux_manager.capture_snapshot(job)
         if snapshot is None:
             return await self._handle_missing_window(job)

@@ -43,14 +43,29 @@ async def cancel_job(job_id: str, request: Request) -> JobRecord:
     job = await services.queue.get_job(job_id)
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
-    if job.state == JobState.CANCELLED:
+    if job.state in {JobState.CANCEL_REQUESTED, JobState.CANCELLED}:
         return job
     if job.state in {JobState.COMPLETED, JobState.FAILED, JobState.STUCK}:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Terminal jobs cannot be cancelled")
 
-    await services.tmux_manager.terminate_job(job)
     job.next_retry_at = None
-    job.transition(JobState.CANCELLED, "Job cancelled by operator", "api")
+    active_states = {
+        JobState.LAUNCHING,
+        JobState.WAITING_FOR_PROVIDER_READY,
+        JobState.SENDING_PROMPT,
+        JobState.RUNNING,
+        JobState.WAITING_FOR_CLASSIFIER,
+    }
+    if job.state in active_states:
+        job.transition(
+            JobState.CANCEL_REQUESTED,
+            "Cancellation requested by operator; host worker will stop the tmux session",
+            "api",
+        )
+        await services.queue.save_job(job, unschedule=True)
+        return job
+
+    job.transition(JobState.CANCELLED, "Job cancelled by operator before provider launch", "api")
     await services.queue.save_job(job, unschedule=True)
     return job
 
@@ -67,10 +82,10 @@ async def retry_job(job_id: str, request: Request) -> JobRecord:
         JobState.SENDING_PROMPT,
         JobState.RUNNING,
         JobState.WAITING_FOR_CLASSIFIER,
+        JobState.CANCEL_REQUESTED,
     }:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Running jobs cannot be retried")
 
-    await services.tmux_manager.terminate_job(job)
     job.attempt_count = 0
     job.prompt_attempt_count = 0
     job.provider_ready_at = None

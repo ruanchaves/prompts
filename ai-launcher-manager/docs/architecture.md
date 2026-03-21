@@ -1,34 +1,67 @@
 # Architecture
 
-This document explains how the system behaves internally so an operator can predict what it will do without reading the code.
+This document explains how the system behaves internally in the current host-execution model.
 
 ## Components
 
-- `FastAPI`: API surface, OpenAPI docs, and process lifecycle
-- `RedisQueue`: stores prompt jobs, scheduled retries, and worker heartbeats
-- `ProviderManager`: defines the fixed launch commands and Claude continue message
-- `TmuxManager`: launches provider sessions, captures pane output, injects prompts, sends continue actions, and kills completed windows
-- `CompositeSessionClassifier`: uses `codex exec` first and falls back to heuristics
-- `SessionMonitor`: waits for provider readiness, confirms prompt delivery, classifies runtime output, and schedules retries
-- `ConcurrencyController`: tracks separate adaptive concurrency limits for `codex` and `claude`
-- `RecoveryService`: reconciles Redis state and tmux windows after restart
-- `WorkerService`: runs scheduler, monitor, and heartbeat loops
+- `FastAPI`
+  - accepts jobs
+  - exposes health, worker, and metrics endpoints
+  - runs in Docker
+- `RedisQueue`
+  - stores jobs, retry schedules, worker heartbeats, and concurrency state
+- `Host WorkerService`
+  - runs on the host
+  - leases jobs from Redis
+  - launches and monitors tmux sessions
+- `ProviderManager`
+  - defines the fixed provider commands and Claude continue message
+- `TmuxManager`
+  - owns the managed host tmux session
+  - launches provider sessions
+  - captures pane output
+  - injects prompts
+  - terminates or cleans up windows
+- `CompositeSessionClassifier`
+  - uses `codex exec` first and heuristics second
+- `SessionMonitor`
+  - turns tmux snapshots into job-state transitions
+- `ConcurrencyController`
+  - tracks per-provider adaptive limits in Redis
+- `RecoveryService`
+  - re-adopts tmux windows and reconciles job state after worker restart
+
+## Runtime Split
+
+Docker runtime:
+
+- API
+- Redis
+
+Host runtime:
+
+- worker loop
+- tmux server and windows
+- `codex`
+- `claude`
+
+This split is intentional so provider auth and interactive tooling remain on the host.
 
 ## System Boundaries
 
-The app is responsible for:
+The system is responsible for:
 
-- queueing jobs
-- starting provider sessions
+- queueing prompt jobs
+- launching fixed provider sessions on the host
 - deciding when to inject prompts
 - monitoring long-running sessions
-- retrying after unhealthy events
-- cleaning up finished windows
+- retrying after failures or rate limits
+- cleaning up finished host tmux windows
 
-The app is not responsible for:
+The system is not responsible for:
 
-- authenticating the provider CLIs on your behalf
-- managing separate worker containers
+- authenticating provider CLIs for you
+- storing provider credentials in Docker
 - acting as a general shell-command runner
 
 ## Queue Model
@@ -36,70 +69,92 @@ The app is not responsible for:
 Redis stores:
 
 - one JSON record per job
-- a sorted set of scheduled job ids keyed by next eligible execution time
+- a sorted set of scheduled job ids
 - worker heartbeats
-- per-provider adaptive concurrency state
+- per-provider concurrency records
 
-Operational implication:
+Operational implications:
 
 - if Redis is lost, queue state is lost
-- if the API process restarts but Redis remains, jobs can be recovered
+- if the API restarts but Redis stays up, jobs remain available
+- if the host worker restarts, it can recover from Redis plus host tmux state
 
 ## Fixed Provider Launch Model
 
-The API accepts prompt jobs, not arbitrary shell commands.
+The API accepts prompt jobs, not raw commands.
 
-The launcher always starts one of these exact provider sessions:
+The host worker always launches one of these exact commands:
 
 - `codex --yolo`
 - `claude --dangerously-skip-permissions`
 
-This is important because:
+This matters because:
 
-- readiness detection assumes an interactive provider shell
-- rate-limit recovery assumes the live session can be resumed or prompted again
-- the app is intentionally not a generic command queue
+- readiness detection assumes interactive provider startup
+- Claude rate-limit recovery assumes the live session can be resumed
+- prompt reinjection assumes a stable provider shell
 
 ## Launch Lifecycle
 
 The full lifecycle is:
 
-1. queue job
-2. lease job from Redis
-3. open or replace the dedicated tmux window
-4. launch the fixed provider command
-5. classify the session until the provider appears ready
-6. inject the pending prompt through tmux buffers
-7. classify again until prompt acceptance appears confirmed
-8. monitor for:
-   - normal progress
+1. API enqueues a prompt job in Redis
+2. host worker leases the job
+3. host worker opens or replaces the dedicated tmux window
+4. host worker launches the fixed provider command
+5. classifier evaluates provider readiness
+6. worker injects the pending prompt through tmux buffers
+7. classifier confirms prompt acceptance
+8. worker monitors for:
+   - progress
    - rate limits
    - failures
    - stuck behavior
    - completion
-9. clean up the tmux window if the job becomes terminal
+   - cancellation requests
+9. worker cleans up the tmux window when the job becomes terminal
 
 ## Job States
 
-- `queued`: waiting for scheduler lease
-- `launching`: tmux window is being created
-- `waiting_for_provider_ready`: provider started, prompt not sent yet
-- `sending_prompt`: pending prompt was injected and is awaiting confirmation
-- `running`: prompt accepted and work is underway
-- `waiting_for_classifier`: monitor is currently classifying the latest snapshot
-- `rate_limited`: waiting until a classifier-selected retry time
-- `retrying`: generic relaunch retry path
-- `completed`: terminal success
-- `failed`: terminal failure
-- `stuck`: terminal no-progress state after retries are exhausted
-- `cancelled`: operator-stopped terminal state
+- `queued`
+- `launching`
+- `waiting_for_provider_ready`
+- `sending_prompt`
+- `running`
+- `waiting_for_classifier`
+- `cancel_requested`
+- `rate_limited`
+- `retrying`
+- `completed`
+- `failed`
+- `stuck`
+- `cancelled`
 
 State interpretation:
 
-- `waiting_for_provider_ready` means launch succeeded but prompt injection has not happened yet
-- `sending_prompt` means the prompt was injected but the monitor is still confirming the provider accepted it
-- `rate_limited` means the job is intentionally parked until `next_retry_at`
-- `retrying` means the app plans a fresh provider launch
+- `waiting_for_provider_ready`: provider is running but prompt injection has not happened yet
+- `sending_prompt`: the prompt was injected and acceptance is being confirmed
+- `cancel_requested`: the API accepted a live cancel and the host worker still needs to kill the tmux window
+- `rate_limited`: the job is parked until `next_retry_at`
+
+## Health And Heartbeats
+
+The API does not inspect host tmux directly.
+
+Instead, the host worker publishes heartbeats to Redis with:
+
+- `execution_target`
+- `tmux_session_name`
+- `tmux_session_exists`
+- `provider_limits`
+- `active_by_provider`
+
+The `/health` endpoint derives tmux health from those heartbeats when the embedded worker is disabled.
+
+Operational consequence:
+
+- `worker_missing` means no host worker heartbeat is present
+- `host_missing` means a worker heartbeat exists but the managed tmux session is not reported as live
 
 ## Classifier Contract
 
@@ -107,10 +162,10 @@ The classifier receives:
 
 - provider
 - current job state
-- prompt attempt metadata
+- prompt-attempt metadata
 - pending prompt
 - launch command
-- current local time and timezone
+- local time and timezone
 - recent tmux output
 - pane exit metadata
 
@@ -122,129 +177,104 @@ It returns:
 - whether the provider is ready
 - whether the prompt appears accepted
 - suggested action
-- optional local retry time
-- recovery action such as:
-  - `press_continue`
-  - `send_continue_message`
-  - `relaunch_provider`
+- optional retry time
+- optional recovery action
 
-Operational implication:
-
-- if the codex classifier is healthy, behavior is flexible and message-aware
-- if the classifier is unavailable or low-confidence, heuristics are used conservatively
+The primary implementation uses `codex exec`.
 
 ## Readiness Detection
 
-The app does not assume a provider is ready immediately after process start.
+The worker never assumes the provider is ready immediately after launch.
 
-Instead it waits for the classifier to say one of:
+Instead it waits for classifier evidence that:
 
 - the provider is ready for prompt input
-- the provider is still starting
-- the prompt was already accepted
+- or prompt acceptance already appears to have happened
 
-This matters because interactive CLIs can:
+This protects against:
 
-- draw a splash screen
-- restore a prior session
-- ask for auth or confirmation
-- take time to initialize tools
+- slow startup
+- auth prompts
+- splash screens
+- session restoration output
 
-## Prompt Injection And Confirmation
+## Prompt Injection
 
-Prompt injection uses tmux buffers instead of naive shell escaping.
+Prompt injection uses tmux buffers instead of shell-escaped command strings.
 
-This was chosen so that:
+This preserves:
 
-- multiline prompts survive intact
-- quoting is not fragile
-- the app can re-send the exact same prompt during retries
+- multiline prompts
+- exact retry content
+- safer re-send behavior
 
-After injection, the job enters `sending_prompt` and the monitor must confirm the prompt appears accepted. If not, it can retry prompt delivery without immediately relaunching the provider.
+After injection, the job moves to `sending_prompt` until prompt acceptance is confirmed.
 
 ## Claude Rate-Limit Recovery
 
-Claude may stop in a continue-required rate-limit state. Instead of relying mainly on fixed regexes, the classifier interprets the output and decides:
+Claude rate-limit handling is still classifier-driven.
 
-- whether this is the continue-style Claude limit mode
-- what retry time should be used in local time
+The worker uses Codex to decide:
+
+- whether the output is really the continue-style Claude rate-limit mode
+- what local retry time should be used
 - whether to:
-  - press/trigger continue in the existing tmux session
+  - press continue
   - send the continue message
   - relaunch the provider
 
-The continue message used by the system is:
+The continue message is:
 
 ```text
 Continue where you left off. The previous attempt was rate limited.
 ```
 
-Operational implication:
-
-- `rate_limited` is not necessarily a failure
-- Claude jobs may resume without a full relaunch if the existing session is still usable
-
 ## Adaptive Concurrency
 
-Concurrency is maintained separately for each provider in Redis.
+Concurrency is tracked separately for each provider in Redis.
 
 - both providers start at `AILM_INITIAL_CONCURRENCY_PER_PROVIDER`
-- repeated successful completions increase the limit gradually
-- rate limits, launch failures, and other unhealthy outcomes decrease it
+- successful completions gradually increase limits
+- rate limits and failures reduce limits
 
-This is intentionally simple and operationally transparent, not a complex control system.
+Operational consequence:
 
-Operational implication:
+- `codex` and `claude` can scale independently
+- `/metrics` is the main source of truth for current limits
 
-- Claude can back off while Codex keeps scaling, or vice versa
-- `/metrics` is the main source of truth for current provider limits
+## Cancellation Model
+
+Because provider execution happens on the host, active cancellation is a two-step process:
+
+1. the API marks the job as `cancel_requested`
+2. the host worker sees that state, kills the tmux window, and finalizes `cancelled`
+
+Operational consequence:
+
+- `cancel_requested` should be short-lived
+- a stuck `cancel_requested` state usually means the host worker is down or unhealthy
 
 ## tmux Cleanup Policy
 
-Completed or terminal sessions are cleaned up automatically. The app kills finished tmux windows instead of leaving them hanging, which reduces instability and prevents orphaned finished sessions from accumulating.
+Terminal sessions are cleaned up automatically by the host worker.
 
-Operational implication:
+Operational consequence:
 
-- if a window is still present long after terminal completion, treat that as abnormal
+- if a completed window remains on the host, cleanup failed or the worker stopped mid-transition
 
 ## Restart Recovery
 
-On startup the recovery service:
+On host worker startup, the recovery service:
 
-1. ensures the managed tmux session exists
-2. re-schedules queued, retrying, and rate-limited jobs if scheduling metadata is missing
-3. preserves partially launched sessions if their tmux windows still exist
-4. requeues partially launched sessions whose windows disappeared
-5. removes lingering finished windows for terminal jobs
+1. ensures the managed host tmux session exists
+2. re-schedules queued, retrying, and rate-limited jobs when needed
+3. finalizes pending cancellations
+4. preserves active jobs whose host tmux windows still exist
+5. requeues active jobs whose windows disappeared if retries remain
+6. removes lingering terminal windows
 
-Operational implication:
+Operational consequence:
 
-- a process restart should not lose queued work as long as Redis survived
-- a live tmux window can be adopted after restart
-- a missing live window usually leads to a requeue if retries remain
-
-## Failure Modes
-
-Common unhealthy paths are:
-
-- provider failed to launch
-- provider never became ready
-- prompt was sent too early and not accepted
-- provider hit a rate limit
-- tmux window disappeared unexpectedly
-- classifier judged the session as stuck
-- provider process exited non-zero
-
-The app reacts by:
-
-- retrying prompt delivery
-- parking a rate-limited job until `next_retry_at`
-- relaunching the provider
-- marking the job terminal when retries are exhausted
-
-## Operational Notes
-
-- The codex classifier should be treated as the primary interpreter for readiness, prompt acceptance, and Claude limit messages.
-- Heuristics remain as a fallback safety layer, not as the main control logic.
-- The fastest operator view is usually: `/health`, `/metrics`, then `/jobs/{job_id}`.
-- The most useful manual inspection path is usually the tmux pane capture for one job window.
+- queue state survives API restarts as long as Redis remains
+- host tmux state survives API restarts because it is outside Docker
+- host worker restart is the key recovery event for execution ownership

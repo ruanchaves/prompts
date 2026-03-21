@@ -190,3 +190,25 @@ async def test_completed_jobs_cleanup_tmux_window() -> None:
     assert job.state == JobState.COMPLETED
     assert tmux.cleaned == [True]
     assert concurrency.events == [ProviderHealthEvent.COMPLETED]
+
+
+@pytest.mark.asyncio
+async def test_cancel_requested_jobs_are_terminated_by_host_worker() -> None:
+    job = make_job(JobState.CANCEL_REQUESTED)
+    snapshot = SessionSnapshot(tmux_target="ai-launcher-manager:job-1", recent_output="")
+    result = ClassificationResult(
+        state=ClassificationState.RUNNING,
+        confidence=0.5,
+        reason="unused",
+        suggested_action=SuggestedAction.CONTINUE_MONITORING,
+        provider_ready=True,
+        prompt_accepted=True,
+    )
+    monitor, tmux, queue, concurrency = make_monitor(snapshot, result)
+
+    await monitor.inspect_job(job)
+
+    assert tmux.terminated == 1
+    assert job.state == JobState.CANCELLED
+    assert queue.saved[-1] == ("cancelled", None, True)
+    assert concurrency.events == []

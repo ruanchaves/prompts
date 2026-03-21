@@ -25,16 +25,31 @@ class TmuxManager:
     def window_name_for_job(self, job_id: str) -> str:
         return f"job-{job_id}"
 
-    async def _run(self, *args: str, check: bool = True, timeout: int = 15) -> tuple[int, str, str]:
+    async def _run(
+        self,
+        *args: str,
+        check: bool = True,
+        timeout: int = 15,
+        capture_output: bool = True,
+    ) -> tuple[int, str, str]:
         process = await asyncio.create_subprocess_exec(
             *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE if capture_output else asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE if capture_output else asyncio.subprocess.DEVNULL,
         )
         try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+            if capture_output:
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+            else:
+                await asyncio.wait_for(process.wait(), timeout=timeout)
+                stdout = b""
+                stderr = b""
         except asyncio.TimeoutError:
-            process.kill()
+            if process.returncode is None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
             await process.wait()
             raise RuntimeError(f"Command timed out: {' '.join(args)}") from None
 
@@ -51,17 +66,22 @@ class TmuxManager:
         stdin_text: str,
         check: bool = True,
         timeout: int = 15,
+        capture_output: bool = True,
     ) -> tuple[int, str, str]:
         process = await asyncio.create_subprocess_exec(
             *args,
             stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE if capture_output else asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE if capture_output else asyncio.subprocess.DEVNULL,
         )
         try:
             stdout, stderr = await asyncio.wait_for(process.communicate(stdin_text.encode("utf-8")), timeout=timeout)
         except asyncio.TimeoutError:
-            process.kill()
+            if process.returncode is None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
             await process.wait()
             raise RuntimeError(f"Command timed out: {' '.join(args)}") from None
 
@@ -72,14 +92,14 @@ class TmuxManager:
         return process.returncode, stdout_text, stderr_text
 
     async def session_exists(self) -> bool:
-        code, _, _ = await self._run("tmux", "has-session", "-t", self.session_name, check=False)
+        code, _, _ = await self._run("tmux", "has-session", "-t", self.session_name, check=False, capture_output=False)
         return code == 0
 
     async def ensure_session(self) -> None:
         if not await self.session_exists():
-            await self._run("tmux", "new-session", "-d", "-s", self.session_name, "-n", "bootstrap")
-        await self._run("tmux", "set-window-option", "-g", "remain-on-exit", "on")
-        await self._run("tmux", "set-window-option", "-g", "allow-rename", "off")
+            await self._run("tmux", "new-session", "-d", "-s", self.session_name, "-n", "bootstrap", capture_output=False)
+        await self._run("tmux", "set-window-option", "-g", "remain-on-exit", "on", capture_output=False)
+        await self._run("tmux", "set-window-option", "-g", "allow-rename", "off", capture_output=False)
 
     async def window_exists(self, window_name: str) -> bool:
         if not await self.session_exists():
@@ -104,6 +124,7 @@ class TmuxManager:
             "-t",
             f"{self.session_name}:{window_name}",
             check=False,
+            capture_output=False,
         )
 
     async def launch_job(self, job: JobRecord) -> tuple[str, str]:
@@ -125,6 +146,7 @@ class TmuxManager:
             f"AILM_PROVIDER={job.provider.value}",
             "bash",
             str(self.wrapper_script),
+            capture_output=False,
         )
         return self.session_name, window_name
 
@@ -185,21 +207,22 @@ class TmuxManager:
         await self._run_with_input(
             ["tmux", "load-buffer", "-b", buffer_name, "-"],
             stdin_text=prompt,
+            capture_output=False,
         )
-        await self._run("tmux", "paste-buffer", "-d", "-b", buffer_name, "-t", target)
-        await self._run("tmux", "send-keys", "-t", target, "Enter")
+        await self._run("tmux", "paste-buffer", "-d", "-b", buffer_name, "-t", target, capture_output=False)
+        await self._run("tmux", "send-keys", "-t", target, "Enter", capture_output=False)
 
     async def press_continue(self, job: JobRecord) -> None:
         if not job.tmux_window or not await self.window_exists(job.tmux_window):
             raise RuntimeError("Managed tmux window is missing")
         target = f"{self.session_name}:{job.tmux_window}"
-        await self._run("tmux", "send-keys", "-t", target, "Enter")
+        await self._run("tmux", "send-keys", "-t", target, "Enter", capture_output=False)
 
     async def terminate_job(self, job: JobRecord) -> None:
         if not job.tmux_window or not await self.window_exists(job.tmux_window):
             return
         target = f"{self.session_name}:{job.tmux_window}"
-        await self._run("tmux", "send-keys", "-t", target, "C-c", check=False)
+        await self._run("tmux", "send-keys", "-t", target, "C-c", check=False, capture_output=False)
         await asyncio.sleep(1)
         await self.kill_window(job.tmux_window)
 

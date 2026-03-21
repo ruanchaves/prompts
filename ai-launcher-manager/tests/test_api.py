@@ -40,3 +40,18 @@ def test_create_and_list_prompt_jobs_via_api() -> None:
         payload = list_response.json()
         assert payload["total"] == 1
         assert payload["jobs"][0]["job_id"] == created["job_id"]
+
+
+def test_health_reports_missing_host_worker_when_api_runs_without_embedded_worker() -> None:
+    redis_client = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    settings = Settings(enable_background_worker=False, classifier_enabled=False, test_mode=True)
+    app = create_app(settings=settings, redis_client=redis_client)
+
+    with TestClient(app) as client:
+        response = client.get("/health")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["status"] == "degraded"
+        assert payload["redis"] == "ok"
+        assert payload["tmux"] == "worker_missing"
+        assert payload["worker_count"] == 0

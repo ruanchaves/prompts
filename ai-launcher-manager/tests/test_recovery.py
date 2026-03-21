@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from app.core.config import Settings
 from app.models.jobs import JobProvider, JobRecord, JobState, RetryPolicy
 from app.services.provider_manager import ProviderManager
 from app.services.recovery import RecoveryService
+from app.services.tmux_manager import TmuxManager
 
 
 class DummyQueue:
@@ -63,3 +66,39 @@ async def test_recovery_requeues_partially_launched_jobs_without_windows() -> No
 
     assert job.state == JobState.RETRYING
     assert queue.saved[-1][1] is True
+
+
+@pytest.mark.asyncio
+async def test_tmux_run_without_output_capture_waits_instead_of_communicate(monkeypatch: pytest.MonkeyPatch) -> None:
+    class DummyProcess:
+        def __init__(self) -> None:
+            self.returncode = 0
+            self.wait_called = False
+            self.communicate_called = False
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            self.communicate_called = True
+            return b"", b""
+
+        async def wait(self) -> int:
+            self.wait_called = True
+            return 0
+
+        def kill(self) -> None:
+            return None
+
+    process = DummyProcess()
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    manager = TmuxManager(Settings(enable_background_worker=False, classifier_enabled=False, test_mode=True))
+    code, stdout, stderr = await manager._run("tmux", "new-session", "-d", capture_output=False)
+
+    assert code == 0
+    assert stdout == ""
+    assert stderr == ""
+    assert process.wait_called is True
+    assert process.communicate_called is False

@@ -7,8 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends bash curl git nodejs npm tmux \
-    && npm install -g @openai/codex @anthropic-ai/claude-code \
+    && apt-get install -y --no-install-recommends bash curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml README.md ./

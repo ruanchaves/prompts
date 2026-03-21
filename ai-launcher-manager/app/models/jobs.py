@@ -23,6 +23,7 @@ class JobState(str, Enum):
     SENDING_PROMPT = "sending_prompt"
     RUNNING = "running"
     WAITING_FOR_CLASSIFIER = "waiting_for_classifier"
+    CANCEL_REQUESTED = "cancel_requested"
     RATE_LIMITED = "rate_limited"
     RETRYING = "retrying"
     COMPLETED = "completed"
@@ -88,6 +89,7 @@ MONITORED_JOB_STATES = {
     JobState.SENDING_PROMPT,
     JobState.RUNNING,
     JobState.WAITING_FOR_CLASSIFIER,
+    JobState.CANCEL_REQUESTED,
 }
 
 

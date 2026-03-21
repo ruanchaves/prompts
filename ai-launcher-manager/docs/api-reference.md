@@ -1,28 +1,37 @@
 # API Reference
 
-This document describes the externally visible API contract for operating the service.
+This document describes the externally visible API contract.
 
 Base URL:
 
 ```text
-http://localhost:8000
+http://localhost:8003
 ```
 
 OpenAPI UI:
 
 ```text
-http://localhost:8000/docs
+http://localhost:8003/docs
 ```
+
+## Deployment Assumption
+
+The API is expected to run in Docker while the worker runs on the host.
+
+Operational consequence:
+
+- the API can be healthy while job execution is blocked if no host worker heartbeat is present
+- `/workers` is part of the operational contract, not just debugging metadata
 
 ## Common Job Object
 
-The main job response includes these fields:
+The main job object includes:
 
-- `job_id`: unique id
-- `provider`: `codex` or `claude`
-- `prompt`: original submitted prompt
-- `launch_command`: derived fixed launch command
-- `priority`: integer from 0 to 100
+- `job_id`
+- `provider`
+- `prompt`
+- `launch_command`
+- `priority`
 - `retry_policy`
 - `metadata`
 - `state`
@@ -96,14 +105,7 @@ Example response:
   "tmux_session": null,
   "tmux_window": null,
   "last_output": "",
-  "failure_reason": null,
-  "events": [
-    {
-      "state": "queued",
-      "source": "api",
-      "message": "Prompt job enqueued"
-    }
-  ]
+  "failure_reason": null
 }
 ```
 
@@ -113,34 +115,25 @@ List jobs.
 
 Query parameters:
 
-- `state`: optional filter
-- `limit`: optional page size
-- `offset`: optional offset
+- `state`
+- `limit`
+- `offset`
 
 Example:
 
 ```bash
-curl "http://localhost:8000/jobs?state=running&limit=20&offset=0"
-```
-
-Response shape:
-
-```json
-{
-  "jobs": [],
-  "total": 0
-}
+curl "http://localhost:8003/jobs?state=running&limit=20&offset=0"
 ```
 
 ## `GET /jobs/{job_id}`
 
 Fetch one job record.
 
-Use this endpoint to inspect:
+Use this to inspect:
 
 - current state
 - retry timing
-- tmux identifiers
+- host tmux identifiers
 - classifier reasoning
 - recent output
 - event history
@@ -148,36 +141,41 @@ Use this endpoint to inspect:
 Example:
 
 ```bash
-curl http://localhost:8000/jobs/<job-id>
+curl http://localhost:8003/jobs/<job-id>
 ```
 
 ## `POST /jobs/{job_id}/cancel`
 
-Cancel a non-terminal job.
+Cancel a job.
 
 Behavior:
 
-- sends `Ctrl-C` to the tmux session if it still exists
-- kills the managed tmux window
-- marks the job as `cancelled`
-- removes it from the schedule
+- terminal jobs cannot be cancelled
+- queued or not-yet-running jobs move directly to `cancelled`
+- active jobs move to `cancel_requested`
+- the host worker observes `cancel_requested`, kills the host tmux window, and finalizes `cancelled`
+
+Operational implication:
+
+- `cancel_requested` is an expected transient state
+- if a job stays in `cancel_requested`, the host worker is not keeping up or is unavailable
 
 ## `POST /jobs/{job_id}/retry`
 
-Manual retry for a non-running job.
+Retry a non-running job.
 
 Behavior:
 
-- rejects retries for active lifecycle states
-- resets prompt-delivery counters and readiness timestamps
-- restores the original prompt as the pending prompt
-- requeues the job immediately
+- active lifecycle states cannot be retried
+- prompt-delivery counters and readiness timestamps are reset
+- the original prompt becomes the pending prompt again
+- the job is requeued immediately
 
 ## `GET /health`
 
 Health check.
 
-Response:
+Healthy example:
 
 ```json
 {
@@ -188,11 +186,32 @@ Response:
 }
 ```
 
-Interpretation:
+Degraded example when the API is up but no host worker is present:
 
-- `redis`: Redis connectivity from the app
-- `tmux`: whether the managed tmux session exists
-- `worker_count`: heartbeat count currently visible in Redis
+```json
+{
+  "status": "degraded",
+  "redis": "ok",
+  "tmux": "worker_missing",
+  "worker_count": 0
+}
+```
+
+Field meaning:
+
+- `status`
+  - `ok`: Redis is reachable and worker/tmux status is healthy
+  - `degraded`: the API is up, but worker or tmux execution is not healthy
+  - `error`: Redis is not reachable
+- `redis`
+  - API-to-Redis connectivity status
+- `tmux`
+  - `ok`: at least one worker reports a live managed tmux session
+  - `worker_missing`: no worker heartbeat is visible
+  - `host_missing`: a worker heartbeat exists but no live managed tmux session is reported
+  - `missing`: only used in embedded-worker mode
+- `worker_count`
+  - number of visible worker heartbeats in Redis
 
 ## `GET /workers`
 
@@ -203,106 +222,49 @@ Each worker entry includes:
 - `worker_id`
 - `updated_at`
 - `active_jobs`
+- `details.execution_target`
 - `details.tmux_session_name`
+- `details.tmux_session_exists`
 - `details.provider_limits`
 - `details.active_by_provider`
+
+For the standard deployment:
+
+- `details.execution_target` should be `host`
 
 ## `GET /metrics`
 
 Operational summary.
 
-Response shape:
+Response includes:
 
-```json
-{
-  "counts_by_state": {
-    "queued": 2,
-    "running": 1
-  },
-  "total_jobs": 3,
-  "provider_concurrency": [
-    {
-      "provider": "codex",
-      "current_limit": 5,
-      "success_streak": 1,
-      "failure_streak": 0,
-      "total_completions": 10,
-      "total_failures": 1,
-      "total_rate_limits": 0
-    },
-    {
-      "provider": "claude",
-      "current_limit": 4,
-      "success_streak": 0,
-      "failure_streak": 1,
-      "total_completions": 8,
-      "total_failures": 2,
-      "total_rate_limits": 3
-    }
-  ]
-}
-```
+- `counts_by_state`
+- `total_jobs`
+- `provider_concurrency`
 
-Use this to understand:
+Use this to inspect:
 
 - queue pressure
-- current provider health
-- whether concurrency is scaling up or backing off
+- provider health
+- current adaptive concurrency limits
 
 ## Job States
 
-- `queued`: waiting in Redis schedule
-- `launching`: tmux/provider launch is being created
-- `waiting_for_provider_ready`: provider is live but prompt has not been injected yet
-- `sending_prompt`: prompt was injected and acceptance is being confirmed
-- `running`: prompt accepted and work appears active
-- `waiting_for_classifier`: current snapshot is being classified
-- `rate_limited`: retry is deferred to a specific time
-- `retrying`: generic relaunch retry
-- `completed`: successful terminal state
-- `failed`: unsuccessful terminal state
-- `stuck`: terminal no-progress state
-- `cancelled`: manually cancelled terminal state
+- `queued`
+- `launching`
+- `waiting_for_provider_ready`
+- `sending_prompt`
+- `running`
+- `waiting_for_classifier`
+- `cancel_requested`
+- `rate_limited`
+- `retrying`
+- `completed`
+- `failed`
+- `stuck`
+- `cancelled`
 
-## `classifier_result`
+State meaning:
 
-The classifier result is the key explanation field.
-
-It contains:
-
-- `state`
-- `confidence`
-- `reason`
-- `suggested_action`
-- `provider_ready`
-- `prompt_accepted`
-- `recovery_action`
-- `retry_at`
-- `source`
-
-Use it to answer:
-
-- is the provider ready yet
-- was the prompt actually accepted
-- is this a Claude continue-style rate limit
-- when will the system retry
-- what recovery path was chosen
-
-## Event History
-
-Each job stores a short rolling event list.
-
-Each event includes:
-
-- `at`
-- `state`
-- `source`
-- `message`
-
-Use this to reconstruct:
-
-- launch attempts
-- readiness transitions
-- prompt injection attempts
-- rate-limit scheduling
-- terminal outcomes
+- `cancel_requested`: the API accepted a live cancellation, but the host worker still needs to kill the tmux session
+- `cancelled`: cancellation is complete
