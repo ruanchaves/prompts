@@ -43,7 +43,7 @@ docker compose up --build
 
 Redis port note:
 
-- the Redis container now publishes on host port `6380`
+- the Redis container now publishes on host port `6381`
 - inside the Docker network it still listens on `6379`
 - the API container continues to use `redis:6379`
 
