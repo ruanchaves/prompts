@@ -40,6 +40,15 @@ class ConcurrencyController:
     async def get_limit(self, provider: JobProvider) -> int:
         return (await self.get_state(provider)).current_limit
 
+    def _effective_ceiling(self, record: ProviderConcurrencyRecord) -> int:
+        """Return the effective ceiling, respecting the high water mark if fresh."""
+        ceiling = self.settings.concurrency_safety_ceiling
+        if record.high_water_mark is not None and record.high_water_mark_set_at is not None:
+            age = (utcnow() - record.high_water_mark_set_at).total_seconds()
+            if age < self.settings.high_water_mark_reset_seconds:
+                ceiling = min(ceiling, record.high_water_mark)
+        return ceiling
+
     async def record_event(self, provider: JobProvider, event: ProviderHealthEvent) -> ProviderConcurrencyRecord:
         record = await self.get_state(provider)
 
@@ -47,22 +56,29 @@ class ConcurrencyController:
             record.total_completions += 1
             record.success_streak += 1
             record.failure_streak = 0
+            ceiling = self._effective_ceiling(record)
             if (
                 record.success_streak >= self.settings.concurrency_increase_after_successes
-                and record.current_limit < self.settings.max_concurrency_per_provider
+                and record.current_limit < ceiling
             ):
                 record.current_limit += 1
                 record.success_streak = 0
         else:
+            # Record the level that caused the failure as the high water mark.
+            record.high_water_mark = record.current_limit
+            record.high_water_mark_set_at = utcnow()
+
             record.success_streak = 0
             record.failure_streak += 1
             if event == ProviderHealthEvent.RATE_LIMITED:
                 record.total_rate_limits += 1
             else:
                 record.total_failures += 1
+
+            # AIMD: multiplicative decrease (halve), clamped to min.
             record.current_limit = max(
                 self.settings.min_concurrency_per_provider,
-                record.current_limit - self.settings.concurrency_decrease_step,
+                record.current_limit // 2,
             )
 
         return await self.save_state(record)

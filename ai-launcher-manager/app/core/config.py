@@ -42,11 +42,11 @@ class Settings(BaseSettings):
     prompt_delivery_timeout_seconds: int = Field(default=20, ge=5, le=600)
     max_prompt_delivery_attempts: int = Field(default=3, ge=1, le=20)
 
-    initial_concurrency_per_provider: int = Field(default=5, ge=1, le=100)
+    initial_concurrency_per_provider: int = Field(default=3, ge=1, le=100)
     min_concurrency_per_provider: int = Field(default=1, ge=1, le=100)
-    max_concurrency_per_provider: int = Field(default=10, ge=1, le=100)
+    concurrency_safety_ceiling: int = Field(default=50, ge=1, le=100)
     concurrency_increase_after_successes: int = Field(default=3, ge=1, le=50)
-    concurrency_decrease_step: int = Field(default=1, ge=1, le=10)
+    high_water_mark_reset_seconds: int = Field(default=3600, ge=60, le=86_400)
 
     local_timezone: str | None = None
 

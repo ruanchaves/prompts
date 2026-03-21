@@ -18,4 +18,6 @@ class ProviderConcurrencyRecord(BaseModel):
     total_completions: int = 0
     total_failures: int = 0
     total_rate_limits: int = 0
+    high_water_mark: int | None = None
+    high_water_mark_set_at: datetime | None = None
     updated_at: datetime = Field(default_factory=utcnow)
