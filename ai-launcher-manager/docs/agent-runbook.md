@@ -53,6 +53,8 @@ Important:
 
 - `docker-compose.yml` currently points the container env to `.env.example`
 - if you want different settings, edit `.env.example` or adjust the compose file
+- Redis is published on host port `6380`, not `6379`
+- inside the Compose network the API still connects to Redis at `redis:6379`
 
 ## Verify The Stack
 
