@@ -46,9 +46,11 @@ After posting the spec, proceed directly to Phase 2.
 
 ### 2a. Pre-implementation smoke test
 Before writing any code:
-1. Run the existing test suite on main and capture the output as the baseline. Save this to a temporary file
-   (`/tmp/baseline_tests_<X>.log`). Any pre-existing failures are not your responsibility — note them for
-   later comparison.
+1. Run **only the test files directly related to the files in scope** on main and capture the output as the
+   baseline. Save this to a temporary file (`/tmp/baseline_tests_<X>.log`). Any pre-existing failures are not
+   your responsibility — note them for later comparison.
+   **Do NOT run the full test suite.** The full suite can take tens of minutes and will stall the pipeline.
+   Identify the relevant test files from the spec's Scope and Testing Strategy sections and run only those.
 2. Verify that every file listed in the spec's Scope section actually exists in the repo. If any are missing,
    stop and flag the discrepancy to the user.
 
@@ -61,8 +63,9 @@ Before writing any code:
 - After all plan steps, execute the Testing Strategy:
   1. Update existing tests identified in the spec.
   2. Write new test cases using the names and assertions from the spec.
-  3. Run the full test suite and fix failures introduced by this change. Compare against the baseline from
-     step 2a — only failures that are new relative to the baseline need fixing.
+  3. Run the same targeted test files from the baseline (step 2a) and fix failures introduced by this change.
+     Compare against the baseline — only failures that are new relative to the baseline need fixing.
+     **Never run the full test suite** — it is too slow and will cause the pipeline to hang.
   4. Perform the end-to-end verification.
 - Commit test changes separately.
 - Verify each edge case from Impact Analysis is handled.
@@ -73,7 +76,7 @@ Before opening the PR:
    the spec's Plan section. If it does not, you either combined or split steps — fix the history to match
    the spec exactly.
 2. Rebase the feature branch onto latest main to catch conflicts early. If conflicts arise, resolve them and
-   re-run the test suite.
+   re-run the targeted tests from step 2a (never the full suite).
 
 ### 2d. Open the PR
 - Push the branch and open a PR against main. PR body must include:
