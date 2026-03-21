@@ -19,6 +19,7 @@ from app.models.jobs import (
     SuggestedAction,
     utcnow,
 )
+from app.services.monitor_orchestrator import MonitorOrchestrator
 from app.services.provider_manager import ProviderManager
 from app.services.session_monitor import SessionMonitor
 
@@ -88,13 +89,19 @@ def make_monitor(snapshot: SessionSnapshot, result: ClassificationResult) -> tup
     queue = DummyQueue()
     tmux = DummyTmux(snapshot)
     concurrency = DummyConcurrencyController()
+    orchestrator = MonitorOrchestrator(
+        settings=settings,
+        queue=queue,
+        tmux_manager=tmux,
+        provider_manager=ProviderManager(),
+        concurrency_controller=concurrency,
+    )
     monitor = SessionMonitor(
         settings=settings,
         queue=queue,
         tmux_manager=tmux,
         classifier=DummyClassifier(result),
-        provider_manager=ProviderManager(),
-        concurrency_controller=concurrency,
+        orchestrator=orchestrator,
     )
     return monitor, tmux, queue, concurrency
 
